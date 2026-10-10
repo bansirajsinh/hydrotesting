@@ -1,0 +1,4 @@
+# Primary local ALPR pipeline. Python 3.10+ recommended.
+fast-alpr[onnx]==0.4.0
+opencv-python-headless>=4.10,<5
+numpy>=1.26,<2.0

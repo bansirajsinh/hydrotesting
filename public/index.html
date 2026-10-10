@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f4f7fb"><title>FuelFlux | CNG Verification</title>
+  <link rel="stylesheet" href="/css/style.css">
+  <script src="/js/app.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <a class="brand" href="#dashboard" aria-label="FuelFlux dashboard"><span class="brand-mark">🔥</span><span>FuelFlux</span></a>
+      <nav class="nav-list" aria-label="Main navigation">
+        <a href="#dashboard" data-view="dashboard" class="nav-link active"><span class="nav-icon">▦</span>Dashboard</a>
+        <a href="#scan" data-view="scan" class="nav-link"><span class="nav-icon">⇧</span>Scan Vehicle</a>
+        <a href="#cctv" data-view="cctv" class="nav-link"><span class="nav-icon">◉</span>Live CCTV</a>
+        <a href="#vehicles" data-view="vehicles" class="nav-link"><span class="nav-icon">🚘</span>Vehicle Database</a>
+        <a href="#assets" data-view="assets" class="nav-link"><span class="nav-icon">▤</span>CNG Assets</a>
+        <a href="#hydrotests" data-view="hydrotests" class="nav-link"><span class="nav-icon">✓</span>Hydrotests</a>
+        <a href="#history" data-view="history" class="nav-link"><span class="nav-icon">◷</span>Entry History</a>
+        <a href="#review" data-view="review" class="nav-link"><span class="nav-icon">⚑</span>Review Queue</a>
+        <a href="#settings" data-view="settings" class="nav-link"><span class="nav-icon">⚙</span>Settings & Health</a>
+      </nav>
+      <div class="sidebar-bottom"><div class="profile"><div class="avatar">BG</div><div><strong>Station Operator</strong><span>Local demo workspace</span></div></div><div class="demo-note"><span class="dot"></span> Demo environment</div></div>
+    </aside>
+    <main class="main-area">
+      <header class="topbar"><button class="icon-button mobile-menu" id="menuToggle" aria-label="Toggle menu">☰</button><div class="breadcrumb"><span>Operations</span><span class="crumb-divider">/</span><strong id="currentPageLabel">Station Overview</strong></div><div class="topbar-right"><span class="health-pill" id="apiHealth"><i></i> Checking API…</span><button class="icon-button" id="refreshBtn" title="Refresh current page" aria-label="Refresh">⟳</button></div></header>
+      <section class="view-container" id="viewContainer" aria-live="polite"><div class="loading-block"><span class="spinner"></span><span>Loading station workspace…</span></div></section>
+      <footer class="app-footer"><span>FuelFlux · CNG Verification</span><span>Station Operations</span></footer>
+    </main>
+  </div>
+  <div class="modal-backdrop hidden" id="modalBackdrop"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle"><header class="modal-header"><div><div class="eyebrow" id="modalEyebrow">RECORD MANAGEMENT</div><h2 id="modalTitle">Add record</h2></div><button type="button" class="icon-button" id="modalClose" aria-label="Close dialog">✕</button></header><div class="modal-body" id="modalBody"></div></section></div>
+  <div class="toast-region" id="toastRegion" aria-live="polite" aria-atomic="true"></div>
+</body>
+</html>

@@ -1,0 +1,15 @@
+node_modules/
+.env
+.venv/
+__pycache__/
+*.pyc
+storage/uploads/*
+storage/crops/*
+data/supplied-media/*
+!storage/uploads/.gitkeep
+!storage/crops/.gitkeep
+!data/supplied-media/.gitkeep
+.pytest_cache/
+cv_worker/models/awiros_anpr/model.safetensors
+cv_worker/vendor/PaddleOCR/
+cv_worker/models/awiros_anpr/*.part

@@ -1,0 +1,3 @@
+# Optional fallback engine when FastALPR cannot initialize.
+# Install separately; PyTorch/EasyOCR may consume significant disk space.
+easyocr>=1.7.2,<2
