@@ -1,48 +1,67 @@
-# Testing and Verification
+# FuelFlux Automated Testing Documentation
 
-## Automated tests included
+This document describes the automated testing strategy, execution commands, and test suites verifying system correctness, data validation, and safety interlock behavior.
 
-Node unit tests (`npm test`) exercise:
-- registration normalization and supported format screening;
-- date-only parsing;
-- status calculations for missing/pass/due-soon/overdue/failed/pending cases;
-- conservative vehicle decision rules.
+---
 
-Python unit tests (`python -m unittest discover -s cv_worker/tests -v`) exercise:
-- plate normalization without dangerous character substitutions;
-- common Indian registration-shaped strings and BH-shaped strings;
-- candidate aggregation across frames.
+## 1. Test Suite Summary
 
-## Commands
+The repository includes **26 automated test cases** across Node.js and Python test runners, requiring no third-party test framework installations (built on Node.js native test runner and Python `unittest`).
 
+| Test Suite | File | Count | Focus |
+|---|---|:---:|---|
+| **Domain Logic** | `tests/domain.test.js` | 8 | Plate normalization, date parsing, safety status hierarchy, decision matrix |
+| **Hydrotests API** | `tests/hydrotests.test.js` | 5 | Endpoints (`/api/hydrotests/*`), date validation, 409 conflict, timestamp preservation |
+| **Verification Engine** | `tests/verification.test.js` | 5 | Interlock decision engine, safety blocks for overdue/failed tests, OCR consensus |
+| **Python Computer Vision** | `cv_worker/tests/test_scanner.py` | 8 | Plate regex matching, Bharat series scoring, multi-frame OCR consensus |
+
+---
+
+## 2. Test Execution Commands
+
+### Run Full Node.js Suite
 ```bash
 npm test
-npm run check
-python -m unittest discover -s cv_worker/tests -v
-python -m py_compile cv_worker/scan_media.py
 ```
 
-## Manual integration checklist
-- Start MongoDB and run `npm run seed`.
-- Run `npm run dev`; verify `/api/health` responds with database connected.
-- Add a vehicle and verify it appears after reload.
-- Add a CNG asset linked to that vehicle.
-- Add passing/failed/pending hydrotests and test status precedence.
-- Upload a valid sample photo/video and poll its scan until terminal state.
-- Confirm candidates, confidence, frames and decisions are stored in MongoDB.
-- Try a missing plate and a plate not present in the vehicle database.
-- Test duplicate plates and certificate references.
-- Add an authorized camera URL, test frame decode and start/stop monitoring if a reachable stream is available.
-- Confirm a database/worker failure cannot return `DISPENSING_ALLOWED`.
+### Run Full Python Unit Tests
+```bash
+npm run test:python
+```
 
-## Results from this artifact-generation environment
-- Node syntax checks passed for the files checked during generation.
-- 5 Node unit tests passed.
-- 6 Python unit tests passed.
-- Python compile check passed.
-- Full Express/MongoDB API integration was not run because MongoDB and Node package dependencies were not installed/available in this environment.
-- ALPR inference was not run because `fast-alpr`/ONNX models and EasyOCR were not installed here.
-- No vehicle videos or photos were present in `data/supplied-media/`, so no actual plate has been extracted in this environment.
-- No live CCTV stream was available; hardware-stream behavior must be verified by the user with authorized camera details.
+### Full Project Code Check & Tests
+```bash
+npm run check
+```
 
-Passing unit tests validate covered rules only; they do not establish recognition accuracy, camera availability, all-pages runtime correctness or production readiness.
+---
+
+## 3. Detailed Test Suite Coverage
+
+### A. Domain & Business Rules (`tests/domain.test.js`)
+- **Plate Normalization**: Confirms that whitespace, lowercase, and hyphens are normalized while preserving valid characters (`gj 01 ab 1234` -> `GJ01AB1234`).
+- **Syntax Validation**: Tests standard Indian vehicle registration formats and Bharat Series (`21BH1234AA` passes; invalid characters like `21BH1234IO` fail).
+- **Date-Only Parsing**: Confirms rejection of malformed or impossible dates (e.g. `2026-02-31`).
+- **Asset Status Priority**:
+  - `FAILED` takes absolute precedence over future expiration dates.
+  - `OVERDUE` triggers immediately when `nextDueDate < today`.
+  - `DUE_SOON` triggers when expiration is within 30 days.
+  - `VALID` requires active test date and future expiration.
+
+### B. Hydrotesting API Contract (`tests/hydrotests.test.js`)
+- **GET `/api/hydrotests/summary`**: Validates summary counts schema (`totalAssets`, `valid`, `dueSoon`, `overdue`, `failed`, `pending`, `noRecord`).
+- **GET `/api/hydrotests/assets`**: Verifies asset register contains at least 8 fictional assets.
+- **GET `/api/hydrotests/records`**: Verifies at least 12 hydrotest records across Pass, Fail, Pending, due-soon, and overdue.
+- **POST `/api/hydrotests/records` (Validation Rule)**: Asserts HTTP 400 Bad Request when `nextDueDate` is earlier than `testDate`.
+- **Duplicate Certificate Handling**: Asserts HTTP 409 Conflict when attempting to create a hydrotest with an existing `certificateReference`.
+- **Timestamp Integrity**: Asserts that `PATCH /api/hydrotests/records/:id` updates `updatedAt` while strictly preserving `createdAt`.
+
+### C. Safety Interlock Engine (`tests/verification.test.js`)
+- **Refueling Authorization**: Only allows dispensing when all linked cylinders have `PASS` and valid future dates.
+- **Safety Blocking**: Verifies that any failed cylinder locks the dispenser (`DO_NOT_DISPENSE_FAILED`) even if the expiration date is far in the future.
+- **Overdue Locking**: Verifies that expired tests immediately engage interlock lock (`DO_NOT_DISPENSE_OVERDUE`).
+- **Unregistered Vehicles**: Issues `HOLD_VEHICLE_NOT_FOUND` hold state.
+
+### D. Python ALPR & Consensus (`cv_worker/tests/test_scanner.py`)
+- **Shape Scoring**: Verifies high shape scores for authentic Indian plates (`GJ01AB1234`, `21BH1234AA`) and rejects short non-plate text.
+- **Multi-Frame Consensus**: Confirms that candidates seen across multiple distinct video frames outrank single-frame false positives.

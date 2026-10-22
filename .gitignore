@@ -6,6 +6,8 @@ __pycache__/
 storage/uploads/*
 storage/crops/*
 data/supplied-media/*
+data/*.mp4
+storage/workflow_frames/*
 !storage/uploads/.gitkeep
 !storage/crops/.gitkeep
 !data/supplied-media/.gitkeep
@@ -13,3 +15,4 @@ data/supplied-media/*
 cv_worker/models/awiros_anpr/model.safetensors
 cv_worker/vendor/PaddleOCR/
 cv_worker/models/awiros_anpr/*.part
+*.pt.tmp

@@ -56,3 +56,232 @@
 @media(max-width:640px){.verification-state-grid{grid-template-columns:1fr}.verification-state{grid-template-columns:1fr auto;align-items:center}.verification-state>span{grid-column:1/-1}.verification-state .status{grid-column:2;grid-row:2}}
 
 .status.eligible{color:#0d9b6b;background:#e8fbf3}.status.not_eligible{color:#d92d36;background:#fff0f0}
+
+/* ========================================================
+   LIVE CCTV / CAMERA SCANNER & INTERLOCK WORKFLOW (MATCHING FINAL_HYDRO.MP4)
+   ======================================================== */
+.live-camera-layout{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(360px,1fr);gap:24px;align-items:start}
+@media(max-width:1150px){.live-camera-layout{grid-template-columns:1fr}}
+
+.live-viewport-card{background:#0b111a;border:1px solid #1f2c3f;border-radius:20px;overflow:hidden;box-shadow:0 18px 45px rgba(5,10,20,.4)}
+.live-viewport-head{display:flex;align-items:center;justify-content:space-between;padding:14px 20px;background:rgba(255,255,255,.03);border-bottom:1px solid rgba(255,255,255,.07)}
+.live-viewport-title{display:flex;align-items:center;gap:10px;color:#f1f5f9;font-weight:700;font-size:13px}
+.live-indicator-dot{width:9px;height:9px;background:#ef4444;border-radius:50%;display:inline-block;box-shadow:0 0 10px #ef4444}
+.live-indicator-dot.active{background:#10b981;box-shadow:0 0 12px #10b981;animation:pulseLive 1.6s infinite}
+@keyframes pulseLive{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.6;transform:scale(1.2)}}
+
+.live-monitor-area{position:relative;width:100%;aspect-ratio:16/10;background:#060a10;display:flex;align-items:center;justify-content:center;overflow:hidden}
+.live-video-element{width:100%;height:100%;object-fit:cover;display:block}
+.live-overlay-canvas{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:4}
+
+/* Scanning Reticle Brackets */
+.scan-reticle{position:absolute;inset:18% 18%;pointer-events:none;z-index:3;border-radius:12px;transition:all .2s}
+.scan-reticle::before,.scan-reticle::after{content:'';position:absolute;width:32px;height:32px;border:3px solid #22c55e;filter:drop-shadow(0 0 6px rgba(34,197,94,.8))}
+.scan-reticle::before{top:0;left:0;border-right:0;border-bottom:0;border-top-left-radius:10px}
+.scan-reticle::after{bottom:0;right:0;border-left:0;border-top:0;border-bottom-right-radius:10px}
+.reticle-corner-tr,.reticle-corner-bl{position:absolute;width:32px;height:32px;border:3px solid #22c55e;filter:drop-shadow(0 0 6px rgba(34,197,94,.8))}
+.reticle-corner-tr{top:0;right:0;border-left:0;border-bottom:0;border-top-right-radius:10px}
+.reticle-corner-bl{bottom:0;left:0;border-right:0;border-top:0;border-bottom-left-radius:10px}
+.reticle-guide-text{position:absolute;bottom:-30px;left:50%;transform:translateX(-50%);font-family:Manrope,sans-serif;font-size:10px;font-weight:800;letter-spacing:.14em;color:rgba(255,255,255,.75);background:rgba(0,0,0,.65);padding:4px 12px;border-radius:999px;white-space:nowrap;backdrop-filter:blur(6px);border:1px solid rgba(255,255,255,.1)}
+
+/* Animated Laser Scanner */
+.laser-beam{position:absolute;left:10%;right:10%;height:3px;background:linear-gradient(90deg,transparent,#ff4d4d,#ff9900,transparent);box-shadow:0 0 16px #ff6600,0 0 30px #ff3300;z-index:5;pointer-events:none;animation:laserSweep 2.2s ease-in-out infinite alternate}
+@keyframes laserSweep{0%{top:22%;opacity:.2}50%{opacity:1}100%{top:78%;opacity:.3}}
+
+/* Viewport Pills */
+.viewport-status-badge{position:absolute;top:16px;left:16px;z-index:6;display:flex;align-items:center;gap:8px;padding:6px 14px;background:rgba(12,19,31,.85);border:1px solid rgba(255,255,255,.14);border-radius:999px;font-size:11px;font-weight:800;letter-spacing:.08em;color:#e2e8f0;backdrop-filter:blur(8px)}
+.viewport-status-badge i{width:8px;height:8px;border-radius:50%;background:#ef4444}
+.viewport-status-badge.scanning i{background:#10b981;box-shadow:0 0 8px #10b981}
+.viewport-status-badge.analyzing i{background:#3b82f6;box-shadow:0 0 8px #3b82f6}
+
+/* Toolbar Controls */
+.live-controls-bar{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;background:#0d1522;border-top:1px solid #1f2c3f;gap:12px;flex-wrap:wrap}
+.controls-group{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+
+/* Indian High Security Registration Plate (HSRP) Badge */
+.hsrp-badge{display:inline-flex;align-items:stretch;background:#fff;border:2px solid #111827;border-radius:8px;box-shadow:0 6px 16px rgba(0,0,0,.15);overflow:hidden;height:52px;min-width:240px}
+.hsrp-flag{background:#003399;color:#fff;padding:0 8px;display:flex;flex-direction:column;align-items:center;justify-content:center;font-weight:900;font-size:10px;letter-spacing:.04em;user-select:none;border-right:1.5px solid #111827}
+.hsrp-chakra{font-size:13px;line-height:1;margin-bottom:2px}
+.hsrp-number{font-family:'Lucida Console',Consolas,Menlo,monospace;font-size:26px;font-weight:900;color:#111827;letter-spacing:2px;display:flex;align-items:center;padding:0 16px}
+
+/* Glowing Safety Interlock Banner */
+.interlock-card{border-radius:18px;padding:22px 24px;margin-bottom:20px;position:relative;overflow:hidden;transition:all .3s ease}
+.interlock-card.allowed{background:linear-gradient(135deg,#064e3b 0%,#047857 60%,#059669 100%);color:#fff;box-shadow:0 14px 34px rgba(5,150,105,.28);border:1px solid #10b981}
+.interlock-card.locked{background:linear-gradient(135deg,#7f1d1d 0%,#991b1b 60%,#b91c1c 100%);color:#fff;box-shadow:0 14px 34px rgba(185,28,28,.32);border:1px solid #ef4444}
+.interlock-card.hold{background:linear-gradient(135deg,#78350f 0%,#92400e 60%,#b45309 100%);color:#fff;box-shadow:0 14px 34px rgba(180,83,9,.28);border:1px solid #f59e0b}
+.interlock-top{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:8px}
+.interlock-icon-title{display:flex;align-items:center;gap:14px}
+.interlock-icon{width:46px;height:46px;border-radius:14px;display:grid;place-items:center;font-size:24px;background:rgba(255,255,255,.18);backdrop-filter:blur(4px);flex-shrink:0}
+.interlock-title{font:800 22px Manrope,sans-serif;letter-spacing:-.4px;margin:0}
+.interlock-subtitle{font-size:13px;opacity:.92;margin:4px 0 0;line-height:1.5}
+.interlock-pill{padding:6px 14px;border-radius:999px;font-size:11px;font-weight:800;letter-spacing:.08em;background:rgba(255,255,255,.2);text-transform:uppercase}
+
+/* Rich Vehicle Info Grid (6 Cards matching video) */
+.vehicle-grid-6{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:18px 0}
+@media(max-width:768px){.vehicle-grid-6{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.v-card{background:#fff;border:1px solid #e2e8f0;border-radius:14px;padding:14px 16px;box-shadow:0 2px 6px rgba(0,0,0,.02)}
+.v-card span{display:block;font-size:11px;color:#718096;font-weight:600;margin-bottom:5px;text-transform:uppercase;letter-spacing:.04em}
+.v-card strong{display:block;font-size:14px;font-weight:800;color:#1e293b}
+
+/* Cylinder Test Table */
+.cylinder-table-wrap{border:1px solid #e2e8f0;border-radius:14px;overflow:hidden;margin-top:14px;background:#fff}
+.cylinder-table-wrap table{margin:0}
+.cylinder-table-wrap th{background:#f8fafc;font-size:11px;font-weight:800;color:#64748b;padding:12px 16px}
+.cylinder-table-wrap td{padding:14px 16px;font-size:12px}
+
+/* Quick Simulation Selector Bar */
+.sim-pills-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:14px 0 20px;padding:14px;background:#fff;border:1px solid #e2e8f0;border-radius:14px}
+.sim-pills-label{font-size:11px;font-weight:800;color:#64748b;margin-right:4px;text-transform:uppercase;letter-spacing:.05em}
+.sim-btn{border:1px solid #cbd5e1;background:#f8fafc;color:#334155;border-radius:8px;padding:6px 12px;font-size:11px;font-weight:700;display:inline-flex;align-items:center;gap:6px;transition:all .15s}
+.sim-btn:hover{background:#ede9fe;border-color:#8d7cf7;color:#6e60df;transform:translateY(-1px)}
+.sim-btn.active{background:#8d7cf7;color:#fff;border-color:#8d7cf7;box-shadow:0 3px 8px rgba(141,124,247,.3)}
+
+/* Manual Plate Fallback Bar */
+.manual-plate-card{background:#fff;border:1px solid #e2e8f0;border-radius:16px;padding:18px 20px;margin-top:20px;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}
+.manual-plate-card>div{max-width:440px}
+.manual-plate-card h3{margin:0 0 4px;font-size:15px;font-weight:800}
+.manual-plate-card p{margin:0;font-size:12px;color:#64748b}
+.manual-plate-form{display:flex;align-items:center;gap:10px}
+.manual-plate-form input{max-width:200px;font-family:monospace;font-weight:800;font-size:14px;text-transform:uppercase;letter-spacing:1px}
+
+/* Real-Time Scanning HUD & Live Feedback */
+.scanner-hud{background:linear-gradient(135deg,#0f172a 0%,#1e293b 100%);border:1px solid #334155;border-radius:18px;padding:24px;color:#f8fafc;box-shadow:0 12px 30px rgba(15,23,42,.3);position:relative;overflow:hidden}
+.scanner-hud-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;border-bottom:1px solid rgba(255,255,255,.08);padding-bottom:14px}
+.scanner-hud-title{display:flex;align-items:center;gap:10px}
+.scanner-hud-title h3{margin:0;font-size:16px;font-weight:800;letter-spacing:.02em;color:#fff}
+.scanner-pulse-dot{width:10px;height:10px;border-radius:50%;background:#10b981;box-shadow:0 0 12px #10b981;animation:pulseDot 1.4s infinite}
+@keyframes pulseDot{0%{opacity:1;transform:scale(1)}50%{opacity:.4;transform:scale(1.25)}100%{opacity:1;transform:scale(1)}}
+.scanner-hud-tag{background:rgba(59,130,246,.2);border:1px solid rgba(59,130,246,.4);color:#60a5fa;font-size:11px;font-weight:700;padding:4px 10px;border-radius:20px;letter-spacing:.05em;text-transform:uppercase}
+
+.scanner-view-port{position:relative;height:150px;background:#090d16;border:1px solid rgba(255,255,255,.1);border-radius:12px;overflow:hidden;display:flex;align-items:center;justify-content:center;margin-bottom:20px}
+.scanner-grid-bg{position:absolute;inset:0;background-size:24px 24px;background-image:linear-gradient(to right,rgba(255,255,255,.03) 1px,transparent 1px),linear-gradient(to bottom,rgba(255,255,255,.03) 1px,transparent 1px);pointer-events:none}
+.scanner-laser-bar{position:absolute;left:0;right:0;height:3px;background:linear-gradient(90deg,transparent,rgba(16,185,129,.8) 20%,#34d399 50%,rgba(16,185,129,.8) 80%,transparent);box-shadow:0 0 16px #10b981,0 0 32px #10b981;animation:laserSweep 1.6s ease-in-out infinite alternate}
+@keyframes laserSweep{0%{top:4%}100%{top:94%}}
+.scanner-reticle-box{position:relative;width:240px;height:70px;border:2px dashed rgba(52,211,153,.5);border-radius:8px;display:flex;align-items:center;justify-content:center;background:rgba(16,185,129,.05);box-shadow:inset 0 0 15px rgba(16,185,129,.1)}
+.scanner-reticle-text{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;font-weight:800;color:#6ee7b7;letter-spacing:2px;text-align:center}
+
+.scanner-progress-track{height:8px;background:rgba(255,255,255,.1);border-radius:999px;overflow:hidden;position:relative;margin-bottom:14px}
+.scanner-progress-fill{height:100%;background:linear-gradient(90deg,#3b82f6,#10b981);border-radius:999px;transition:width .25s ease}
+.scanner-status-text{display:flex;justify-content:space-between;font-size:12px;color:#94a3b8;font-weight:600;margin-bottom:16px}
+.scanner-status-text strong{color:#38bdf8}
+
+.scanner-stepper{display:flex;flex-direction:column;gap:10px}
+.scanner-step{display:flex;align-items:center;gap:12px;font-size:12px;color:#64748b;font-weight:600;padding:6px 8px;border-radius:8px;transition:all .2s}
+.scanner-step.active{color:#f8fafc;background:rgba(255,255,255,.05)}
+.scanner-step.completed{color:#10b981}
+.scanner-step-icon{width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;border:1px solid currentColor}
+.scanner-step.completed .scanner-step-icon{background:#10b981;color:#fff;border-color:#10b981}
+.scanner-step.active .scanner-step-icon{border-color:#38bdf8;color:#38bdf8;animation:pulseDot 1.2s infinite}
+
+/* Result Screen Styles */
+.verified-screen-banner{background:linear-gradient(135deg,#064e3b 0%,#047857 100%);color:#fff;border-radius:14px;padding:18px 20px;display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:18px;box-shadow:0 6px 20px rgba(6,78,59,.25)}
+.verified-screen-banner.locked{background:linear-gradient(135deg,#7f1d1d 0%,#b91c1c 100%);box-shadow:0 6px 20px rgba(127,29,29,.25)}
+.verified-screen-banner.hold{background:linear-gradient(135deg,#78350f 0%,#d97706 100%);box-shadow:0 6px 20px rgba(120,53,15,.25)}
+.verified-banner-title{font-size:16px;font-weight:800;letter-spacing:.02em}
+.verified-banner-sub{font-size:12px;opacity:.9;margin-top:2px}
+.verified-badge-pill{background:rgba(255,255,255,.2);backdrop-filter:blur(4px);padding:6px 14px;border-radius:999px;font-size:12px;font-weight:800;letter-spacing:.05em}
+
+/* Button Danger */
+.btn-danger{background:#ef4444;color:#fff;border-color:#ef4444}
+.btn-danger:hover{background:#dc2626;border-color:#dc2626}
+
+/* ========================================================
+   Refined Manual Media Upload Dropzone UI/UX
+   ======================================================== */
+.upload-zone {
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: center !important;
+  justify-content: center !important;
+  width: 100% !important;
+  min-height: 200px !important;
+  border: 2px dashed #b8b0fa !important;
+  background: #faf8ff !important;
+  border-radius: 18px !important;
+  padding: 38px 24px !important;
+  text-align: center !important;
+  cursor: pointer !important;
+  box-sizing: border-box !important;
+  margin: 0 0 16px 0 !important;
+  transition: all 0.22s cubic-bezier(0.16, 1, 0.3, 1) !important;
+}
+
+.upload-zone:hover,
+.upload-zone.dragover {
+  border-color: #6e60df !important;
+  background: #f4efff !important;
+  box-shadow: 0 8px 24px rgba(110, 96, 223, 0.12) !important;
+  transform: translateY(-2px);
+}
+
+.upload-icon {
+  width: 58px !important;
+  height: 58px !important;
+  border-radius: 18px !important;
+  display: grid !important;
+  place-items: center !important;
+  background: #eeebff !important;
+  color: #6e60df !important;
+  margin: 0 auto 14px !important;
+  font-size: 26px !important;
+  font-weight: 700 !important;
+  transition: transform 0.2s ease, background 0.2s ease !important;
+}
+
+.upload-zone:hover .upload-icon {
+  transform: translateY(-3px) scale(1.05);
+  background: #e5defe !important;
+}
+
+.upload-zone h3 {
+  font-size: 16px !important;
+  font-weight: 800 !important;
+  color: #192538 !important;
+  margin: 0 0 6px !important;
+  letter-spacing: -0.2px !important;
+}
+
+.upload-zone p {
+  font-size: 12.5px !important;
+  color: #718096 !important;
+  margin: 0 !important;
+  line-height: 1.55 !important;
+}
+
+#scanForm .actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+#scanForm .actions .btn {
+  min-height: 40px;
+  padding: 0 18px;
+  border-radius: 11px;
+  font-size: 13px;
+  font-weight: 700;
+  transition: all 0.15s ease;
+}
+
+#scanForm .actions .btn-primary {
+  background: linear-gradient(135deg, #8d7cf7 0%, #6e60df 100%);
+  border: none;
+  color: #fff;
+  box-shadow: 0 4px 14px rgba(110, 96, 223, 0.25);
+}
+
+#scanForm .actions .btn-primary:hover:not(:disabled) {
+  box-shadow: 0 6px 18px rgba(110, 96, 223, 0.35);
+  transform: translateY(-1px);
+}
+
+#scanForm .actions .btn-primary:disabled {
+  background: #d4ccfc;
+  box-shadow: none;
+  color: #fff;
+  cursor: not-allowed;
+  opacity: 0.8;
+  transform: none;
+}
+

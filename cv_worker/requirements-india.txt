@@ -1,7 +1,0 @@
-# Indian plate text recognition adapter. Install in the same Python env used by Node.
-# Use Python 3.10 or 3.11 for the least-friction PaddlePaddle setup.
-paddlepaddle>=2.6.0,<4.0.0
-safetensors>=0.4.0,<1.0.0
-PyYAML>=6.0,<7.0
-Pillow>=10,<13
-numpy>=1.26,<2.0

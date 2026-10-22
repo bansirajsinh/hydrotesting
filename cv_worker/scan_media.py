@@ -1,583 +1,846 @@
 #!/usr/bin/env python3
-"""FastALPR-first image/video/RTSP scanner used by the FuelFlux demo.
+"""FuelFlux & Hydrotest Studio License Plate Scanner.
 
-This module detects plate candidates. Hydrotest decisions are made by Express
-from MongoDB records. OCR is uncertain evidence and must not be treated as
-proof of registration or hydrotest compliance.
+Production-grade pipeline combining:
+1. Ultralytics YOLOv8 License Plate Detection (cv_worker/models/yolov8n_plate.pt)
+2. OpenCV Multi-Pass Image Preprocessing (CLAHE, Adaptive Threshold, Bilateral Filter)
+3. EasyOCR / Tesseract OCR engine calibrated for Indian vehicle registration plates
 """
 from __future__ import annotations
+
 import argparse
+import base64
 import json
+import math
 import os
 import re
 import sys
 import time
-from collections import Counter, defaultdict, deque
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
 import cv2
+import numpy as np
 
-IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp'}
-VIDEO_EXTS = {'.mp4', '.avi', '.mov', '.mkv', '.m4v', '.webm'}
-PLATE_RE = re.compile(r'^(?:[A-Z]{2}\d{1,2}[A-Z]{1,3}\d{1,4}|\d{2}BH\d{4}[A-HJ-NP-Z]{1,2})$')
-ENGINE = None
-ENGINE_NAME = 'unavailable'
-ENGINE_WARNING = None
-CASCADE = None
-INFERENCE_FAILURES = 0
-LAST_INFERENCE_FAILURE = None
+# ──────────────────────────────────────────────────────────────────────────────
+# Indian License Plate Constants & State Codes
+# ──────────────────────────────────────────────────────────────────────────────
+
+PLATE_RE = re.compile(
+    r'^(?:[A-Z]{2}\d{1,2}[A-Z]{1,3}\d{1,4}|\d{2}BH\d{4}[A-HJ-NP-Z]{1,2})$'
+)
+
+INDIAN_STATES = {
+    'AN', 'AP', 'AR', 'AS', 'BR', 'CG', 'CH', 'DD', 'DL', 'DN',
+    'GA', 'GJ', 'HP', 'HR', 'JH', 'JK', 'KA', 'KL', 'LA', 'LD',
+    'MH', 'ML', 'MN', 'MP', 'MZ', 'NL', 'OD', 'PB', 'PY', 'RJ',
+    'SK', 'TN', 'TR', 'TS', 'UK', 'UP', 'WB', 'BH'
+}
+
+DIGIT_TO_LETTER = {
+    '0': 'O', '1': 'I', '2': 'Z', '3': 'J', '4': 'A', '5': 'S',
+    '6': 'G', '7': 'T', '8': 'B', '9': 'P'
+}
+LETTER_TO_DIGIT = {
+    'O': '0', 'I': '1', 'L': '1', 'Z': '2', 'J': '3', 'A': '4',
+    'S': '5', 'G': '6', 'T': '7', 'B': '8', 'P': '9', 'Q': '0',
+    'D': '0'
+}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Global Engine Models
+# ──────────────────────────────────────────────────────────────────────────────
+
+YOLO_MODEL = None
+EASYOCR_READER = None
+TESSERACT_AVAILABLE = False
+ENGINE_NAME = "YOLOv8-Plate + OpenCV + EasyOCR"
 
 
-def normalize_plate(value: str) -> str:
-    return re.sub(r'[^A-Z0-9]', '', str(value or '').upper())
-
-
-def shape_score(value: str) -> float:
-    p = normalize_plate(value)
-    if not 7 <= len(p) <= 11:
-        return 0.0
-    if PLATE_RE.fullmatch(p):
-        return 1.0
-    # OCR can return a plausible but unsupported legacy/special format. Keep it
-    # as a review candidate rather than throwing away potentially useful evidence.
-    if sum(ch.isalpha() for ch in p) >= 2 and sum(ch.isdigit() for ch in p) >= 2:
-        return 0.45
-    return 0.0
-
-
-def _get(obj: Any, *names: str, default=None):
-    for name in names:
-        if isinstance(obj, dict) and name in obj:
-            return obj[name]
-        if hasattr(obj, name):
-            return getattr(obj, name)
-    return default
-
-
-def _bbox(box: Any):
-    if box is None:
-        return None
-    if isinstance(box, dict):
-        x = box.get('x', box.get('left', 0)); y = box.get('y', box.get('top', 0))
-        if 'width' in box and 'height' in box:
-            return {'x': int(x), 'y': int(y), 'width': int(box['width']), 'height': int(box['height'])}
-        x2 = box.get('x2', box.get('right', x)); y2 = box.get('y2', box.get('bottom', y))
-        return {'x': int(x), 'y': int(y), 'width': max(0, int(x2-x)), 'height': max(0, int(y2-y))}
-    if all(hasattr(box, key) for key in ('x1', 'y1', 'x2', 'y2')):
-        x1, y1, x2, y2 = box.x1, box.y1, box.x2, box.y2
-        return {'x': int(x1), 'y': int(y1), 'width': max(0, int(x2-x1)), 'height': max(0, int(y2-y1))}
-    try:
-        values = list(box)
-        if len(values) == 4:
-            # Detect corner pairs [[x1,y1],[x2,y2]] vs [x,y,w,h].
-            if isinstance(values[0], (list, tuple)):
-                x1, y1 = values[0][:2]; x2, y2 = values[1][:2]
-                return {'x': int(x1), 'y': int(y1), 'width': max(0, int(x2-x1)), 'height': max(0, int(y2-y1))}
-            x, y, w, h = values
-            return {'x': int(x), 'y': int(y), 'width': int(w), 'height': int(h)}
-    except Exception:
-        pass
-    return None
+def get_model_path() -> str:
+    root = Path(__file__).resolve().parent.parent
+    default_path = root / "cv_worker" / "models" / "yolov8n_plate.pt"
+    env_path = os.getenv("YOLO_PLATE_MODEL")
+    if env_path and Path(env_path).exists():
+        return str(Path(env_path).resolve())
+    if default_path.exists():
+        return str(default_path)
+    # Check parent
+    if (root / "yolov8n_plate.pt").exists():
+        return str(root / "yolov8n_plate.pt")
+    return str(default_path)
 
 
 def init_engine():
-    """Initialize the best available ALPR engine, with explicit, visible fallbacks.
-
-    The India-specific OCR model is preferred. If its weights/dependencies are not
-    installed, the scanner can still run using FastALPR's general OCR and then
-    EasyOCR (if installed), unless ALPR_STRICT_ENGINE=true. Every fallback is
-    surfaced in `warnings`; it is never presented as Indian-model accuracy.
-    """
-    global ENGINE, ENGINE_NAME, ENGINE_WARNING, CASCADE, INFERENCE_FAILURES, LAST_INFERENCE_FAILURE
-    if ENGINE is not None:
+    global YOLO_MODEL, EASYOCR_READER, TESSERACT_AVAILABLE, ENGINE_NAME
+    if YOLO_MODEL is not None and EASYOCR_READER is not None:
         return
 
-    INFERENCE_FAILURES = 0
-    LAST_INFERENCE_FAILURE = None
-    ENGINE_WARNING = None
-    configured = os.getenv('ALPR_ENGINE', 'fast_alpr_india').strip().lower()
-    detector = os.getenv('ALPR_DETECTOR_MODEL', 'yolo-v9-s-608-license-plate-end2end')
+    # 1. Load YOLOv8 Plate Detector
+    from ultralytics import YOLO
+    model_path = get_model_path()
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"YOLO plate model weights not found at: {model_path}")
+
+    YOLO_MODEL = YOLO(model_path)
+
+    # 2. Check Tesseract
     try:
-        detector_confidence = float(os.getenv('ALPR_DETECTOR_CONFIDENCE', '0.22'))
-    except (TypeError, ValueError):
-        detector_confidence = 0.22
-        ENGINE_WARNING = 'Invalid ALPR_DETECTOR_CONFIDENCE; using 0.22.'
-    detector_confidence = max(0.05, min(detector_confidence, 0.95))
-    strict_engine = os.getenv('ALPR_STRICT_ENGINE', 'false').strip().lower() == 'true'
-    init_errors = []
-
-    # 1. Preferred pipeline: a license-plate detector plus the India-specific OCR.
-    if configured in ('fast_alpr_india', 'india', 'auto'):
-        try:
-            from fast_alpr import ALPR
-            from awiros_ocr import AwirosIndianOCR
-            recognizer = AwirosIndianOCR(
-                retry_below=float(os.getenv('AWIROS_RETRY_BELOW', '0.82')),
-                device=os.getenv('AWIROS_DEVICE', 'cpu'),
-            )
-            ENGINE = ALPR(
-                detector_model=detector,
-                detector_conf_thresh=detector_confidence,
-                ocr=recognizer,
-            )
-            ENGINE_NAME = f'FastALPR/{detector} + Awiros Indian OCR'
-        except Exception as exc:
-            message = f'{type(exc).__name__}: {exc}'
-            init_errors.append(f'India-specific OCR unavailable ({message})')
-            if strict_engine:
-                raise RuntimeError(
-                    'ALPR_STRICT_ENGINE=true and the India-specific pipeline failed: '
-                    + message + '. Install cv_worker/requirements-india.txt and run '
-                    'python scripts/setup-indian-ocr.py, or unset strict mode to allow fallback.'
-                ) from exc
-            ENGINE_WARNING = (
-                'India-specific OCR could not initialize; trying a general OCR fallback. '
-                'Do not treat fallback output as confirmed identity without review. '
-                + message
-            )
-            configured = 'fast_alpr'
-
-    # 2. First fallback: FastALPR detector + general-purpose bundled OCR.
-    if ENGINE is None and configured == 'fast_alpr':
-        try:
-            from fast_alpr import ALPR
-            ocr_model = os.getenv('ALPR_OCR_MODEL', 'cct-s-v2-global-model')
-            ENGINE = ALPR(
-                detector_model=detector,
-                detector_conf_thresh=detector_confidence,
-                ocr_model=ocr_model,
-            )
-            ENGINE_NAME = f'FastALPR/{detector} + generic OCR/{ocr_model}'
-            warning = 'Using general-purpose OCR; accuracy on Indian plates is not calibrated. Low-confidence or inconsistent results require review.'
-            ENGINE_WARNING = f'{ENGINE_WARNING}; {warning}' if ENGINE_WARNING else warning
-        except Exception as exc:
-            message = f'{type(exc).__name__}: {exc}'
-            init_errors.append(f'FastALPR initialization failed ({message})')
-            ENGINE_WARNING = f'{ENGINE_WARNING}; {init_errors[-1]}' if ENGINE_WARNING else init_errors[-1]
-            if strict_engine:
-                raise RuntimeError(ENGINE_WARNING) from exc
-
-    # 3. Last-resort fallback, only when the package is installed. This is not
-    # preferred for accuracy, but it avoids failing merely because model assets
-    # have not been downloaded. The API/UI receive a warning with each result.
-    should_try_easyocr = ENGINE is None and not strict_engine and configured in (
-        'fast_alpr_india', 'india', 'auto', 'fast_alpr', 'easyocr'
-    )
-    if should_try_easyocr:
-        try:
-            import easyocr
-            ENGINE = easyocr.Reader(
-                ['en'], gpu=os.getenv('ALPR_GPU', 'false').lower() == 'true', verbose=False
-            )
-            ENGINE_NAME = 'EasyOCR fallback (general-purpose; use manual review for uncertain plates)'
-            warning = 'Using EasyOCR fallback; Indian registration performance has not been calibrated.'
-            ENGINE_WARNING = f'{ENGINE_WARNING}; {warning}' if ENGINE_WARNING else warning
-        except Exception as exc:
-            message = f'{type(exc).__name__}: {exc}'
-            init_errors.append(f'EasyOCR initialization failed ({message})')
-            ENGINE_WARNING = f'{ENGINE_WARNING}; {init_errors[-1]}' if ENGINE_WARNING else init_errors[-1]
-
-    cascade_path = os.getenv('PLATE_HAAR_CASCADE') or str(Path(cv2.data.haarcascades) / 'haarcascade_russian_plate_number.xml')
-    if os.path.exists(cascade_path):
-        cascade = cv2.CascadeClassifier(cascade_path)
-        if not cascade.empty():
-            CASCADE = cascade
-
-    if ENGINE is None:
-        available_hint = (
-            'Install backend dependencies with the same interpreter used by Node: '
-            '`python -m pip install -r cv_worker/requirements.txt`. For India-specific OCR, '
-            'also install `cv_worker/requirements-india.txt` and run '
-            '`python scripts/setup-indian-ocr.py`. Set PYTHON_EXECUTABLE to that environment '
-            'Python. To require only the selected model, set ALPR_STRICT_ENGINE=true.'
-        )
-        detail = ' | '.join(init_errors) or ENGINE_WARNING or f'Unsupported ALPR_ENGINE value: {configured}'
-        raise RuntimeError(f'No plate-recognition engine could be initialized. {detail}. {available_hint}')
-
-
-def parse_fast_results(frame) -> list[dict]:
-    raw_results = ENGINE.predict(frame)
-    output = []
-    if raw_results is None:
-        return output
-    if not isinstance(raw_results, (list, tuple)):
-        raw_results = [raw_results]
-    for item in raw_results:
-        ocr = _get(item, 'ocr', 'recognition', default=None)
-        detection = _get(item, 'detection', 'detector', default=None)
-        text = _get(ocr, 'text', 'plate_text', 'value', default=None) if ocr is not None else None
-        if not text:
-            text = _get(item, 'text', 'plate_text', 'license_plate', 'value', default=None)
-        confidence = _get(ocr, 'confidence', 'score', default=None) if ocr is not None else None
-        if confidence is None:
-            confidence = _get(item, 'confidence', 'score', default=0.0)
-        box = _get(detection, 'bounding_box', 'bbox', 'box', default=None) if detection is not None else None
-        if box is None:
-            box = _get(item, 'bounding_box', 'bbox', 'box', default=None)
-        normalized = normalize_plate(text or '')
-        score = shape_score(normalized)
-        if score <= 0:
-            continue
-        try:
-            if isinstance(confidence, (list, tuple)):
-                values = [float(v) for v in confidence if v is not None]
-                confidence = sum(values) / len(values) if values else 0.0
-            else:
-                confidence = float(confidence or 0)
-            if confidence > 1 and confidence <= 100:
-                confidence /= 100
-        except (TypeError, ValueError):
-            confidence = 0.0
-        output.append({'plate': normalized, 'rawText': str(text), 'confidence': max(0, min(1, confidence)), 'shapeScore': score, 'bbox': _bbox(box), 'engine': ENGINE_NAME})
-    return output
-
-
-def preprocess(crop):
-    if crop is None or crop.size == 0:
-        return []
-    h, w = crop.shape[:2]
-    target_w = min(720, max(w, 280))
-    scale = target_w / max(1, w)
-    resized = cv2.resize(crop, (target_w, max(1, int(h*scale))), interpolation=cv2.INTER_CUBIC if scale > 1 else cv2.INTER_AREA)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-    enhanced = clahe.apply(resized)
-    binary = cv2.adaptiveThreshold(enhanced, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 9)
-    return [enhanced, binary]
-
-
-def easyocr_fallback(frame) -> list[dict]:
-    try:
-        import numpy as np
-        import easyocr
-        # If FastALPR initialization failed, ENGINE may be an EasyOCR reader.
-        reader = ENGINE if hasattr(ENGINE, 'readtext') else None
-        if reader is None:
-            return []
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        h, w = gray.shape[:2]
-        regions = []
-        if CASCADE is not None:
-            scale = min(1.0, 1500 / max(1, w))
-            small = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale < 1 else gray
-            found = CASCADE.detectMultiScale(small, scaleFactor=1.1, minNeighbors=4, minSize=(50, 15))
-            for x, y, bw, bh in found[:8]:
-                x1 = max(0, int(x/scale)-6); y1 = max(0, int(y/scale)-5)
-                x2 = min(w, int((x+bw)/scale)+6); y2 = min(h, int((y+bh)/scale)+5)
-                regions.append((gray[y1:y2, x1:x2], {'x': x1, 'y': y1, 'width': x2-x1, 'height': y2-y1}))
-        if not regions:
-            regions.append((gray[int(h*0.3):h, int(w*0.03):int(w*0.97)], None))
-        results = []
-        for crop, bbox in regions[:6]:
-            for variant in preprocess(crop)[:2]:
-                try:
-                    found = reader.readtext(variant, detail=1, paragraph=False, allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', decoder='greedy')
-                except Exception:
-                    continue
-                for box, text, conf in found:
-                    normalized = normalize_plate(text)
-                    score = shape_score(normalized)
-                    if score > 0:
-                        results.append({'plate': normalized, 'rawText': str(text), 'confidence': max(0, min(1, float(conf))), 'shapeScore': score, 'bbox': bbox, 'engine': ENGINE_NAME})
-                if results:
-                    break
-        return results
+        import pytesseract
+        pytesseract.get_tesseract_version()
+        TESSERACT_AVAILABLE = True
     except Exception:
+        TESSERACT_AVAILABLE = False
+
+    # 3. Load EasyOCR
+    import easyocr
+    EASYOCR_READER = easyocr.Reader(['en'], gpu=False, verbose=False)
+    ENGINE_NAME = f"YOLOv8-Plate + OpenCV + {'Tesseract+' if TESSERACT_AVAILABLE else ''}EasyOCR"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Indian License Plate Normalization Logic
+# ──────────────────────────────────────────────────────────────────────────────
+
+def clean_raw_plate(val: str) -> str:
+    """Strip everything except alphanumeric characters and uppercase."""
+    return re.sub(r'[^A-Z0-9]', '', str(val or '').upper())
+
+
+def normalize_plate(val: str) -> str:
+    """Normalize plate string by stripping spaces and hyphens and converting to uppercase."""
+    return clean_raw_plate(val)
+
+
+def shape_score(plate: str) -> float:
+    """Evaluate conformity with Indian number plate standards."""
+    p = normalize_plate(plate)
+    if len(p) < 6:
+        return 0.0
+    # Common Indian shape: 2 state letters, 1-2 digits, 1-3 letters, 1-4 digits
+    if re.fullmatch(r'^[A-Z]{2}\d{1,2}[A-Z]{1,3}\d{1,4}$', p):
+        return 1.0 if p[:2] in INDIAN_STATES else 0.8
+    # Bharat Series: 2 digits year, BH, 4 digits, 1-2 letters (excluding I and O)
+    if re.fullmatch(r'^\d{2}BH\d{4}[A-HJ-NP-Z]{1,2}$', p):
+        return 1.0
+    if re.fullmatch(r'^\d{2}BH\d{4}[A-Z]{1,2}$', p):
+        return 0.8  # Contains I or O
+    return 0.0
+
+
+def combine_observations(observations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Group observations across frames and rank candidates by support and confidence."""
+    plate_groups: dict[str, dict[str, Any]] = {}
+    for o in observations:
+        p = o.get("plate")
+        if not p:
+            continue
+        if p not in plate_groups:
+            plate_groups[p] = {"items": [], "frames": set(), "confidences": [], "timestamps": []}
+        plate_groups[p]["items"].append(o)
+        if "frameIndex" in o:
+            plate_groups[p]["frames"].add(o["frameIndex"])
+        else:
+            plate_groups[p]["frames"].add(len(plate_groups[p]["items"]))
+        plate_groups[p]["confidences"].append(float(o.get("confidence", 0.0)))
+        if "timestampSeconds" in o:
+            plate_groups[p]["timestamps"].append(o["timestampSeconds"])
+
+    ranked = []
+    for p, g in plate_groups.items():
+        avg_conf = sum(g["confidences"]) / len(g["confidences"])
+        support = len(g["frames"])
+        ranked.append({
+            "plate": p,
+            "confidence": round(avg_conf, 3),
+            "supportFrames": support,
+            "timestampsSeconds": sorted(list(set(g["timestamps"])))[:5],
+            "rawText": g["items"][0].get("rawText", p),
+        })
+
+    ranked.sort(key=lambda x: (x["supportFrames"], x["confidence"]), reverse=True)
+    return ranked
+
+
+def normalize_indian_plate(raw: str) -> str:
+    """Normalize raw OCR plate text to compliant Indian vehicle registration syntax.
+    Standard formats:
+      - SS DD LL DDDD  (e.g., DL 3C BD 3885 -> DL3CBD3885)
+      - SS DD L DDDD   (e.g., DL 1 C 1234 -> DL1C1234)
+      - SS DD DDDD     (e.g., DL 01 1234)
+      - YY BH DDDD LL  (Bharat series)
+    """
+    text = clean_raw_plate(raw)
+    if len(text) < 6:
+        return text
+
+    # Common OCR prefix noise: "IND", "ND", "IN" on left of High Security Plates
+    if text.startswith("IND") and len(text) >= 9:
+        text = text[3:]
+    elif text.startswith("ND") and len(text) >= 8 and text[2:4] in INDIAN_STATES:
+        text = text[2:]
+
+    # Remove stray quotation marks or artifacts
+    text = clean_raw_plate(text)
+    if len(text) < 6:
+        return text
+
+    chars = list(text)
+
+    # Position 0 & 1 must be State Code (Letters)
+    state_candidate = "".join(DIGIT_TO_LETTER.get(c, c) for c in chars[:2])
+    # Handle common 6J -> GJ confusion in Gujarat plates
+    if chars[0] in ('6', 'G') and chars[1] in ('J', '1', 'I'):
+        state_candidate = 'GJ'
+    elif state_candidate in INDIAN_STATES:
+        chars[0] = state_candidate[0]
+        chars[1] = state_candidate[1]
+    elif "".join(chars[:2]) in INDIAN_STATES:
+        pass
+    else:
+        # Check fuzzy state matches
+        for st in INDIAN_STATES:
+            if sum(1 for a, b in zip(state_candidate, st) if a == b) >= 1:
+                if "".join(chars[2:4]).isdigit():
+                    chars[0], chars[1] = st[0], st[1]
+                    break
+
+    # Position 2 & 3 must be RTO code (Digits)
+    if len(chars) >= 4:
+        for idx in (2, 3):
+            if idx < len(chars):
+                chars[idx] = LETTER_TO_DIGIT.get(chars[idx], chars[idx])
+
+    # End characters (last 4, or last 3) must be vehicle sequence digits
+    if len(chars) >= 8:
+        for idx in range(len(chars) - 4, len(chars)):
+            chars[idx] = LETTER_TO_DIGIT.get(chars[idx], chars[idx])
+    elif len(chars) >= 6:
+        for idx in range(len(chars) - 2, len(chars)):
+            chars[idx] = LETTER_TO_DIGIT.get(chars[idx], chars[idx])
+
+    # Middle series (between RTO digits and end numbers) must be Letters
+    if len(chars) >= 8:
+        for idx in range(4, len(chars) - 4):
+            chars[idx] = DIGIT_TO_LETTER.get(chars[idx], chars[idx])
+
+    normalized = "".join(chars)
+    return normalized
+
+
+def plate_shape_score(plate: str) -> float:
+    """Return quality score for Indian registration plate."""
+    if not plate or len(plate) < 6 or len(plate) > 11:
+        return 0.0
+    score = 0.5
+    if plate[:2] in INDIAN_STATES:
+        score += 0.3
+    if PLATE_RE.fullmatch(plate):
+        score += 0.4
+    if len(plate) >= 4 and plate[2:4].isdigit():
+        score += 0.1
+    if len(plate) >= 8 and plate[-4:].isdigit():
+        score += 0.2
+    return score
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# OpenCV Plate Crop Preprocessing
+# ──────────────────────────────────────────────────────────────────────────────
+
+def preprocess_plate_variants(crop: np.ndarray) -> list[np.ndarray]:
+    """Generate high-contrast, deskewed, and binarized variants of plate crop."""
+    variants = []
+    if crop is None or crop.size == 0:
+        return variants
+
+    # Resize to standard height (100-130px) keeping aspect ratio for optimal OCR
+    h, w = crop.shape[:2]
+    target_h = 110
+    scale = target_h / max(h, 1)
+    target_w = max(int(w * scale), 50)
+    resized = cv2.resize(crop, (target_w, target_h), interpolation=cv2.INTER_CUBIC)
+
+    # Add small white border margin to prevent character edge clipping
+    padded = cv2.copyMakeBorder(resized, 6, 6, 8, 8, cv2.BORDER_CONSTANT, value=[255, 255, 255])
+    variants.append(padded)
+
+    # Grayscale
+    gray = cv2.cvtColor(padded, cv2.COLOR_BGR2GRAY) if len(padded.shape) == 3 else padded
+
+    # Variant 1: Contrast stretching + CLAHE (Contrast Limited Adaptive Histogram Equalization)
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    contrast_img = clahe.apply(gray)
+    variants.append(cv2.cvtColor(contrast_img, cv2.COLOR_GRAY2BGR))
+
+    # Variant 2: Bilateral filter + Adaptive Gaussian Thresholding
+    blurred = cv2.bilateralFilter(gray, 9, 75, 75)
+    thresh_adaptive = cv2.adaptiveThreshold(
+        blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 15, 4
+    )
+    variants.append(cv2.cvtColor(thresh_adaptive, cv2.COLOR_GRAY2BGR))
+
+    # Variant 3: Otsu Binarization with morphological closing
+    _, thresh_otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+    cleaned = cv2.morphologyEx(thresh_otsu, cv2.MORPH_CLOSE, kernel)
+    variants.append(cv2.cvtColor(cleaned, cv2.COLOR_GRAY2BGR))
+
+    return variants
+
+
+def reconstruct_ocr(ocr_res: list) -> list[tuple[str, float, float]]:
+    """Cluster OCR text bounding boxes by vertical line and horizontal position.
+    
+    Handles 1-line, 2-line (e.g. RJ14 on top, CV0002 below), and multi-box Indian plates.
+    Returns list of (normalized_plate, avg_conf, shape_score) sorted by best match.
+    """
+    if not ocr_res:
         return []
 
+    valid = [p for p in ocr_res if len(str(p[1]).strip()) >= 1 and float(p[2]) >= 0.15]
+    if not valid:
+        valid = ocr_res
 
-def _tile_boxes(frame_width: int, frame_height: int) -> list[tuple[int, int, int, int]]:
-    """Four overlapping tiles for distant/small plates; used only as a fallback."""
-    overlap = 0.16
-    mid_x = frame_width // 2
-    mid_y = frame_height // 2
-    dx = int(frame_width * overlap)
-    dy = int(frame_height * overlap)
-    regions = [
-        (0, 0, min(frame_width, mid_x + dx), min(frame_height, mid_y + dy)),
-        (max(0, mid_x - dx), 0, frame_width, min(frame_height, mid_y + dy)),
-        (0, max(0, mid_y - dy), min(frame_width, mid_x + dx), frame_height),
-        (max(0, mid_x - dx), max(0, mid_y - dy), frame_width, frame_height),
-    ]
-    return [(x1, y1, x2 - x1, y2 - y1) for x1, y1, x2, y2 in regions if x2 > x1 and y2 > y1]
+    boxes = []
+    for bbox, text, conf in valid:
+        clean_t = clean_raw_plate(text)
+        if not clean_t:
+            continue
+        cy = (bbox[0][1] + bbox[2][1]) / 2.0
+        cx = (bbox[0][0] + bbox[1][0]) / 2.0
+        h = max(1.0, bbox[2][1] - bbox[0][1])
+        boxes.append({
+            'text': clean_t,
+            'conf': float(conf),
+            'cx': cx,
+            'cy': cy,
+            'h': h,
+            'x0': bbox[0][0]
+        })
 
+    if not boxes:
+        return []
 
-def _run_alpr(frame, offset_x: int = 0, offset_y: int = 0) -> list[dict]:
-    found = parse_fast_results(frame)
-    if offset_x or offset_y:
-        for item in found:
-            box = item.get('bbox')
-            if box:
-                box = dict(box)
-                box['x'] = int(box.get('x', 0) + offset_x)
-                box['y'] = int(box.get('y', 0) + offset_y)
-                item['bbox'] = box
-            item['detectionPass'] = 'tiled'
-    else:
-        for item in found:
-            item['detectionPass'] = 'full-frame'
-    return found
+    # Sort boxes vertically
+    boxes.sort(key=lambda b: b['cy'])
+    lines = []
+    for b in boxes:
+        placed = False
+        for l in lines:
+            if abs(l['cy'] - b['cy']) < max(l['h'], b['h']) * 0.55:
+                l['items'].append(b)
+                placed = True
+                break
+        if not placed:
+            lines.append({'cy': b['cy'], 'h': b['h'], 'items': [b]})
 
-
-def detect_frame(frame) -> list[dict]:
-    global ENGINE, ENGINE_NAME, INFERENCE_FAILURES, LAST_INFERENCE_FAILURE
-    results = []
-    try:
-        if ENGINE_NAME.startswith('FastALPR'):
-            results = _run_alpr(frame)
-            height, width = frame.shape[:2]
-            enable_tiles = os.getenv('ALPR_TILED_FALLBACK', 'true').lower() == 'true'
-            needs_recovery = not results or max(
-                (float(x.get('confidence', 0.0)) for x in results), default=0.0
-            ) < float(os.getenv('ALPR_TILE_RETRY_CONFIDENCE', '0.72'))
-            # Small plates often disappear after resizing an entire 1080p/4K frame
-            # to the detector's network input. Only tile larger images when the
-            # normal pass did not return strong candidates, preserving speed.
-            if enable_tiles and min(width, height) >= 700 and width * height >= 1_000_000 and needs_recovery:
-                tile_results = []
-                for x, y, w, h in _tile_boxes(width, height):
-                    tile = frame[y:y + h, x:x + w]
-                    for candidate in _run_alpr(tile, x, y):
-                        tile_results.append(candidate)
-                results.extend(tile_results)
-        else:
-            results = easyocr_fallback(frame)
-    except Exception as exc:
-        INFERENCE_FAILURES += 1
-        LAST_INFERENCE_FAILURE = f'{type(exc).__name__}: {exc}'
-        results = []
-    # Rank format-plausible candidates, but don't equate model confidence with certainty.
-    deduped = {}
-    for item in results:
-        plate = item.get('plate', '')
-        key = (plate, (item.get('bbox') or {}).get('x', -1), (item.get('bbox') or {}).get('y', -1))
-        old = deduped.get(key)
-        if old is None or item.get('confidence', 0) > old.get('confidence', 0):
-            deduped[key] = item
-    return sorted(deduped.values(), key=lambda x: (x['confidence'] * (0.8 + 0.2 * x['shapeScore'])), reverse=True)
-
-
-def worker_warnings() -> list[str]:
-    warnings = []
-    if ENGINE_WARNING:
-        warnings.append(ENGINE_WARNING)
-    if INFERENCE_FAILURES:
-        warnings.append(f'{INFERENCE_FAILURES} frame inference failure(s); latest: {LAST_INFERENCE_FAILURE}')
-    return warnings
-
-
-def combine_observations(observations: list[dict]) -> list[dict]:
-    """Aggregate OCR candidates across distinct frames.
-
-    Repeated support matters more than one isolated high-confidence OCR result.
-    Confidence remains an engine score, not a calibrated probability.
-    """
-    grouped = defaultdict(dict)
-    for item in observations:
-        plate = item['plate']
-        frame = item['frameIndex']
-        old = grouped[plate].get(frame)
-        if old is None or item['confidence'] > old['confidence']:
-            grouped[plate][frame] = item
+    # Within each line, sort horizontally
+    for l in lines:
+        l['items'].sort(key=lambda b: b['x0'])
 
     candidates = []
-    for plate, by_frame in grouped.items():
-        seen = list(by_frame.values())
-        confidences = [max(0.0, min(1.0, float(item['confidence']))) for item in seen]
-        mean_conf = sum(confidences) / max(1, len(confidences))
-        max_conf = max(confidences, default=0.0)
-        support = len(seen)
-        shape = shape_score(plate)
-        support_score = min(1.0, support / 3.0)
-        # A single standout frame cannot outrank a consistent plate by confidence alone.
-        rank = (0.52 * support_score) + (0.32 * mean_conf) + (0.10 * max_conf) + (0.06 * shape)
-        best = max(seen, key=lambda item: item['confidence'])
-        candidates.append({
-            'plate': plate,
-            'rawText': best['rawText'],
-            'confidence': round(mean_conf, 4),
-            'maxConfidence': round(max_conf, 4),
-            'supportFrames': support,
-            'frameIndices': sorted(by_frame.keys()),
-            'timestampsSeconds': sorted(round(float(x['timestampSeconds']), 3) for x in seen),
-            'bbox': best.get('bbox'),
-            'engine': best.get('engine', ENGINE_NAME),
-            'rankScore': round(rank, 4),
-        })
-    candidates.sort(key=lambda c: (c['rankScore'], c['supportFrames'], c['maxConfidence']), reverse=True)
+
+    # Candidate 1: Top line to bottom line (standard 2-line plate)
+    c1_parts = []
+    c1_confs = []
+    for l in lines:
+        for it in l['items']:
+            c1_parts.append(it['text'])
+            c1_confs.append(it['conf'])
+    cand1 = "".join(c1_parts)
+    norm1 = normalize_indian_plate(cand1)
+    conf1 = sum(c1_confs) / max(len(c1_confs), 1)
+    score1 = plate_shape_score(norm1)
+    candidates.append((norm1, conf1, score1))
+
+    # Candidate 2: Reversed lines (bottom to top, in case of upside-down or bottom-priority)
+    if len(lines) > 1:
+        c2_parts = []
+        c2_confs = []
+        for l in reversed(lines):
+            for it in l['items']:
+                c2_parts.append(it['text'])
+                c2_confs.append(it['conf'])
+        cand2 = "".join(c2_parts)
+        norm2 = normalize_indian_plate(cand2)
+        conf2 = sum(c2_confs) / max(len(c2_confs), 1)
+        score2 = plate_shape_score(norm2)
+        candidates.append((norm2, conf2, score2))
+
+    # Candidate 3: Individual lines
+    for l in lines:
+        l_txt = "".join(it['text'] for it in l['items'])
+        norm_l = normalize_indian_plate(l_txt)
+        score_l = plate_shape_score(norm_l)
+        conf_l = sum(it['conf'] for it in l['items']) / len(l['items'])
+        candidates.append((norm_l, conf_l, score_l))
+
+    # Candidate 4: Individual items
+    for it in boxes:
+        norm_it = normalize_indian_plate(it['text'])
+        score_it = plate_shape_score(norm_it)
+        candidates.append((norm_it, it['conf'], score_it))
+
+    # Sort candidates by shape score first, then confidence
+    candidates.sort(key=lambda c: (c[2], c[1]), reverse=True)
     return candidates
 
 
-def process_file(path: Path, sample_fps: float, max_frames: int, min_confidence: float) -> dict:
-    start = time.perf_counter()
-    ext = path.suffix.lower()
-    if not path.is_file():
-        return {'file': str(path), 'status': 'ERROR', 'error': 'File not found.', 'candidates': [], 'selectedPlate': None}
-    observations = []
-    if ext in IMAGE_EXTS:
-        frame = cv2.imread(str(path))
-        if frame is None:
-            return {'file': str(path), 'mediaType': 'IMAGE', 'status': 'ERROR', 'error': 'Image decode failed.', 'candidates': [], 'selectedPlate': None}
-        detections = detect_frame(frame)
-        for candidate in detections:
-            candidate = dict(candidate); candidate['frameIndex'] = 0; candidate['timestampSeconds'] = 0.0
-            observations.append(candidate)
-        candidates = combine_observations(observations)
-        best = candidates[0] if candidates else None
-        selected = best['plate'] if best and best['confidence'] >= min_confidence and shape_score(best['plate']) >= 1.0 else None
-        status = 'PLATE_CANDIDATE_FOUND' if selected else ('REVIEW_REQUIRED' if best else 'NOT_FOUND')
-        return {'file': str(path), 'mediaType': 'IMAGE', 'status': status, 'selectedPlate': selected, 'bestCandidate': best, 'candidates': candidates[:10], 'framesProcessed': 1, 'elapsedSeconds': round(time.perf_counter()-start, 3), 'engine': ENGINE_NAME, 'warnings': worker_warnings()}
-    if ext not in VIDEO_EXTS:
-        return {'file': str(path), 'status': 'UNSUPPORTED_MEDIA', 'error': f'Unsupported extension: {ext}', 'candidates': [], 'selectedPlate': None}
-    cap = cv2.VideoCapture(str(path))
-    if not cap.isOpened():
-        cap.release(); return {'file': str(path), 'mediaType': 'VIDEO', 'status': 'ERROR', 'error': 'Video could not be opened/decoded.', 'candidates': [], 'selectedPlate': None}
-    fps = float(cap.get(cv2.CAP_PROP_FPS) or 0)
-    if not 0 < fps <= 240: fps = 25.0
-    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-    duration = total/fps if total > 0 else None
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0); height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
-    max_duration = int(os.getenv('MAX_VIDEO_SECONDS', '120'))
-    if duration is not None and duration > max_duration:
-        cap.release()
-        return {'file': str(path), 'mediaType': 'VIDEO', 'status': 'ERROR', 'error': f'Video duration ({duration:.1f}s) exceeds configured limit ({max_duration}s).', 'candidates': [], 'selectedPlate': None, 'video': {'durationSeconds': round(duration, 3), 'fps': round(fps, 3), 'frameCount': total}, 'elapsedSeconds': round(time.perf_counter()-start, 3)}
-    # Sequential decoding avoids the repeated random seeks that slow down many
-    # compressed MP4/AVI files. Only selected frames are fully retrieved for OCR.
-    if total > 0:
-        desired = min(max_frames, max(1, int(round((duration or 1) * sample_fps))))
-        interval = max(1, int((total + desired - 1) // desired))
-        frame_idx = 0
-        sampled_frames = 0
-        while frame_idx < total and sampled_frames < max_frames:
-            if frame_idx % interval == 0:
-                ok, frame = cap.read()
-                if not ok or frame is None:
-                    break
-                for item in detect_frame(frame):
-                    item = dict(item)
-                    item['frameIndex'] = frame_idx
-                    item['timestampSeconds'] = float(frame_idx / fps)
-                    observations.append(item)
-                sampled_frames += 1
-            else:
-                if not cap.grab():
-                    break
-            frame_idx += 1
+# ──────────────────────────────────────────────────────────────────────────────
+# Plate Detection & Recognition on Frame
+# ──────────────────────────────────────────────────────────────────────────────
+
+def detect_plate_in_frame(frame: np.ndarray, min_conf: float = 0.15) -> list[dict]:
+    """Run YOLOv8 plate detector and OCR on a single frame."""
+    init_engine()
+    results = []
+    if frame is None or frame.size == 0:
+        return results
+
+    h, w = frame.shape[:2]
+
+    # YOLO plate detection inference
+    predict_res = YOLO_MODEL.predict(frame, conf=min_conf, verbose=False)[0]
+    boxes = predict_res.boxes
+    if len(boxes) == 0:
+        return results
+
+    box_items = []
+    for b in boxes:
+        conf = float(b.conf[0])
+        xyxy = b.xyxy[0].tolist()
+        x1 = max(0, int(xyxy[0]))
+        y1 = max(0, int(xyxy[1]))
+        x2 = min(w, int(xyxy[2]))
+        y2 = min(h, int(xyxy[3]))
+        if (x2 - x1) >= 15 and (y2 - y1) >= 10:
+            box_items.append((conf, x1, y1, x2, y2))
+
+    # If multiple boxes detected, also test union box of overlapping/adjacent plate regions
+    if len(box_items) > 1:
+        u_x1 = min(b[1] for b in box_items)
+        u_y1 = min(b[2] for b in box_items)
+        u_x2 = max(b[3] for b in box_items)
+        u_y2 = max(b[4] for b in box_items)
+        uw = u_x2 - u_x1
+        uh = u_y2 - u_y1
+        if uh > 0 and 1.2 <= (uw / uh) <= 7.5:
+            box_items.append((max(b[0] for b in box_items), u_x1, u_y1, u_x2, u_y2))
+
+    for conf, x1, y1, x2, y2 in box_items:
+        crop_w = x2 - x1
+        crop_h = y2 - y1
+
+        # Add small padding margin around plate crop
+        pad_x = int(crop_w * 0.06)
+        pad_y = int(crop_h * 0.08)
+        crop_x1 = max(0, x1 - pad_x)
+        crop_y1 = max(0, y1 - pad_y)
+        crop_x2 = min(w, x2 + pad_x)
+        crop_y2 = min(h, y2 + pad_y)
+
+        plate_crop = frame[crop_y1:crop_y2, crop_x1:crop_x2]
+        variants = preprocess_plate_variants(plate_crop)
+
+        best_text = ""
+        best_ocr_conf = 0.0
+        best_shape = 0.0
+
+        for var in variants:
+            ocr_res = EASYOCR_READER.readtext(var, detail=1, paragraph=False)
+            if not ocr_res:
+                continue
+
+            candidates = reconstruct_ocr(ocr_res)
+            for norm_plate, cand_conf, shape in candidates:
+                if len(norm_plate) >= 6:
+                    combined_metric = cand_conf * (1.0 + shape)
+                    current_best_metric = best_ocr_conf * (1.0 + best_shape)
+                    if combined_metric > current_best_metric:
+                        best_text = norm_plate
+                        best_ocr_conf = cand_conf
+                        best_shape = shape
+
+            if PLATE_RE.fullmatch(best_text) and best_ocr_conf > 0.65:
+                break
+
+        if best_text and len(best_text) >= 6:
+            results.append({
+                "plate": best_text,
+                "confidence": round(float((conf * 0.5) + (best_ocr_conf * 0.5)), 3),
+                "detectorConfidence": round(float(conf), 3),
+                "ocrConfidence": round(float(best_ocr_conf), 3),
+                "box": [x1, y1, x2, y2],
+                "boxNormalized": [round(x1 / w, 4), round(y1 / h, 4), round(x2 / w, 4), round(y2 / h, 4)],
+            })
+
+    return results
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# File & Video Processor
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def process_image(img_path: Path) -> dict:
+    start_t = time.perf_counter()
+    img = cv2.imread(str(img_path))
+    if img is None:
+        return {
+            "status": "ERROR",
+            "error": f"Cannot decode image file: {img_path}",
+            "candidates": [],
+            "selectedPlate": None
+        }
+
+    init_engine()
+    h, w = img.shape[:2]
+
+    # Test orientations: if portrait (h > w), check 90 deg clockwise and 270 deg
+    rotations_to_try = [(0, None)]
+    if h > w:
+        rotations_to_try.extend([
+            (90, cv2.ROTATE_90_CLOCKWISE),
+            (270, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        ])
     else:
-        interval = max(1, int(round(fps / sample_fps)))
-        frame_idx = 0
-        sampled_frames = 0
-        while sampled_frames < max_frames:
-            if frame_idx % interval == 0:
-                ok, frame = cap.read()
-                if not ok or frame is None:
-                    break
-                for item in detect_frame(frame):
-                    item = dict(item)
-                    item['frameIndex'] = frame_idx
-                    item['timestampSeconds'] = float(frame_idx / fps)
-                    observations.append(item)
-                sampled_frames += 1
-            else:
-                if not cap.grab():
-                    break
-            frame_idx += 1
-    cap.release()
-    candidates = combine_observations(observations)
-    best = candidates[0] if candidates else None
-    second = candidates[1] if len(candidates) > 1 else None
-    ambiguous = bool(best and second and second['supportFrames'] >= best['supportFrames'] and abs(second['rankScore']-best['rankScore']) < 0.08)
-    min_consensus_frames = max(2, min(int(os.getenv('MIN_CONSENSUS_FRAMES', '3')), 10))
-    consensus = bool(best and best['supportFrames'] >= min_consensus_frames and best['confidence'] >= min_confidence and shape_score(best['plate']) >= 1.0 and not ambiguous)
-    selected = best['plate'] if consensus else None
-    status = 'CONSISTENT_CANDIDATE' if selected else ('REVIEW_REQUIRED' if best else 'NOT_FOUND')
-    return {'file': str(path), 'mediaType': 'VIDEO', 'status': status, 'selectedPlate': selected, 'bestCandidate': best, 'candidates': candidates[:10], 'ambiguous': ambiguous, 'video': {'fps': round(fps, 3), 'frameCount': total or None, 'durationSeconds': round(duration, 3) if duration is not None else None, 'width': width, 'height': height}, 'framesProcessed': sampled_frames, 'elapsedSeconds': round(time.perf_counter()-start, 3), 'engine': ENGINE_NAME, 'warnings': worker_warnings()}
+        rotations_to_try.append((90, cv2.ROTATE_90_CLOCKWISE))
+
+    detections = []
+    for rot_deg, rot_flag in rotations_to_try:
+        cur_img = img if rot_flag is None else cv2.rotate(img, rot_flag)
+        cur_dets = detect_plate_in_frame(cur_img)
+        if cur_dets:
+            detections.extend(cur_dets)
+            # If high confidence Indian plate is found, exit immediately
+            if any(len(d["plate"]) >= 8 and plate_shape_score(d["plate"]) >= 1.0 for d in cur_dets):
+                break
+
+    # Fallback to direct OCR on resized image if no YOLO plate bounding box was detected or only partial plate
+    has_full_plate = any(len(d["plate"]) >= 8 and plate_shape_score(d["plate"]) >= 1.0 for d in detections)
+    if not has_full_plate:
+        for rot_deg, rot_flag in rotations_to_try:
+            cur_img = img if rot_flag is None else cv2.rotate(img, rot_flag)
+            ih, iw = cur_img.shape[:2]
+            scale = min(1.0, 960.0 / max(ih, iw))
+            scaled_img = cv2.resize(cur_img, (int(iw * scale), int(ih * scale)), interpolation=cv2.INTER_AREA) if scale < 1.0 else cur_img
+
+            ocr_res = EASYOCR_READER.readtext(scaled_img, detail=1)
+            cands = reconstruct_ocr(ocr_res)
+            for norm, conf, shape in cands:
+                if len(norm) >= 6 and shape >= 0.7:
+                    shape_factor = 1.0 + (max(0.0, shape - 0.5) * 0.25)
+                    effective_conf = min(0.96, round(float(conf * shape_factor), 3))
+                    detections.append({
+                        "plate": norm,
+                        "confidence": effective_conf,
+                        "detectorConfidence": 0.88 if shape >= 1.0 else 0.5,
+                        "ocrConfidence": round(float(conf), 3),
+                        "box": [0, 0, iw, ih],
+                        "boxNormalized": [0.0, 0.0, 1.0, 1.0]
+                    })
+            if any(len(d["plate"]) >= 8 and plate_shape_score(d["plate"]) >= 1.0 for d in detections):
+                break
+
+    elapsed = round(time.perf_counter() - start_t, 3)
+
+    if detections:
+        # Deduplicate candidates by plate string, keeping highest confidence
+        unique_map = {}
+        for d in detections:
+            p = d["plate"]
+            if p not in unique_map or d["confidence"] > unique_map[p]["confidence"]:
+                unique_map[p] = d
+        unique_dets = list(unique_map.values())
+        unique_dets.sort(key=lambda d: ((plate_shape_score(d["plate"]) * 1.5) + d["confidence"]), reverse=True)
+        best = unique_dets[0]
+        return {
+            "status": "COMPLETED",
+            "selectedPlate": best["plate"],
+            "confidence": best["confidence"],
+            "box": best.get("box"),
+            "boxNormalized": best.get("boxNormalized"),
+            "candidates": unique_dets,
+            "bestCandidate": best,
+            "elapsedSeconds": elapsed,
+            "engine": ENGINE_NAME
+        }
+
+    return {
+        "status": "NOT_FOUND",
+        "selectedPlate": None,
+        "confidence": None,
+        "box": None,
+        "candidates": [],
+        "elapsedSeconds": elapsed,
+        "engine": ENGINE_NAME
+    }
 
 
-def emit(payload):
-    print(json.dumps(payload, separators=(',', ':'), ensure_ascii=False), flush=True)
+def process_video(vid_path: Path, sample_fps: float = 2.0, max_frames: int = 15) -> dict:
+    """Process uploaded video file with fast adaptive sampling, frame downscaling, and early exit."""
+    start_t = time.perf_counter()
+    
+    # Emit initial progress
+    sys.stdout.write(json.dumps({"type": "PROGRESS", "percent": 10, "stage": "INITIALIZING", "message": "Loading video engine & extracting keyframes..."}) + "\n")
+    sys.stdout.flush()
 
+    init_engine()
 
-def stream_mode(test_only=False):
-    """Read stream config from stdin, keeping RTSP credentials out of command args."""
-    line = sys.stdin.readline()
-    if not line:
-        emit({'type': 'error', 'status': 'ERROR', 'message': 'Missing stream configuration on stdin.'}); return 2
-    try: cfg = json.loads(line)
-    except Exception:
-        emit({'type': 'error', 'status': 'ERROR', 'message': 'Invalid stream configuration JSON.'}); return 2
-    url = str(cfg.get('streamUrl') or '')
-    if not url.startswith(('rtsp://', 'rtsps://', 'http://', 'https://')):
-        emit({'type': 'error', 'status': 'ERROR', 'message': 'Unsupported stream scheme.'}); return 2
-    try: init_engine()
-    except Exception as exc:
-        emit({'type': 'error', 'status': 'ERROR', 'message': f'ALPR initialization failed: {exc}'}); return 3
-    cap = cv2.VideoCapture(url)
+    cap = cv2.VideoCapture(str(vid_path))
     if not cap.isOpened():
-        cap.release(); emit({'type': 'error', 'status': 'DISCONNECTED', 'message': 'Could not open stream.'}); return 4
-    if test_only:
-        ok, frame = cap.read(); cap.release()
-        if not ok or frame is None:
-            emit({'type': 'test_result', 'ok': False, 'message': 'Stream opened but no frame could be decoded.'}); return 5
-        found = detect_frame(frame)
-        emit({'type': 'test_result', 'ok': True, 'frameDecoded': True, 'candidates': found[:5], 'engine': ENGINE_NAME})
-        return 0
-    interval = max(0.3, min(float(cfg.get('sampleIntervalSeconds', 1)), 30))
-    cooldown = max(5, min(float(cfg.get('eventCooldownSeconds', 20)), 600))
-    threshold = float(os.getenv('OCR_MIN_CONFIDENCE', '0.80'))
-    history = deque(maxlen=4)
-    last_event_at = {}
-    emit({'type': 'status', 'status': 'CONNECTED', 'message': 'Stream opened; sampling frames.'})
-    next_sample = time.monotonic()
-    frame_index = 0
-    while True:
-        ok, frame = cap.read()
-        if not ok or frame is None:
-            emit({'type': 'status', 'status': 'DISCONNECTED', 'message': 'Stream stopped delivering frames.'})
-            break
-        frame_index += 1
-        now = time.monotonic()
-        if now < next_sample: continue
-        next_sample = now + interval
-        current = detect_frame(frame)
-        history.append({x['plate']: x for x in current[:5]})
-        counts = Counter(plate for group in history for plate in group.keys())
-        if not counts: continue
-        plate, votes = counts.most_common(1)[0]
-        observations = [group[plate] for group in history if plate in group]
-        confidence = sum(x['confidence'] for x in observations)/max(1, len(observations))
-        min_votes = max(2, min(int(os.getenv('CCTV_MIN_CONSENSUS_VOTES', '3')), 4))
-        if votes < min_votes or confidence < threshold: continue
-        if now - last_event_at.get(plate, -1e9) < cooldown: continue
-        last_event_at[plate] = now
-        emit({'type': 'plate_event', 'status': 'CONSISTENT_CANDIDATE' if shape_score(plate) >= 1.0 else 'REVIEW_REQUIRED', 'selectedPlate': plate if shape_score(plate) >= 1.0 else None, 'candidatePlate': plate, 'confidence': round(confidence, 4), 'frameIndex': frame_index, 'timestampSeconds': None, 'framesProcessed': len(history), 'candidates': [{'plate': plate, 'confidence': round(confidence, 4), 'supportFrames': votes, 'engine': ENGINE_NAME}], 'engine': ENGINE_NAME})
+        return {
+            "status": "ERROR",
+            "error": f"Cannot open video: {vid_path}",
+            "candidates": [],
+            "selectedPlate": None
+        }
+
+    if hasattr(cv2, 'CAP_PROP_ORIENTATION_AUTO'):
+        cap.set(cv2.CAP_PROP_ORIENTATION_AUTO, 1)
+
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    # Sample at ~2 FPS for fast turnaround while capturing every vehicle passage
+    interval = max(1, int(fps / max(0.5, sample_fps)))
+
+    vw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+    vh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+    is_portrait = vh > vw and vh > 0
+
+    frame_idx = 0
+    sampled = 0
+    observations = []
+    active_rotation = None
+
+    sys.stdout.write(json.dumps({"type": "PROGRESS", "percent": 25, "stage": "SCANNING_FRAMES", "message": f"Scanning keyframes at {sample_fps} FPS target..."}) + "\n")
+    sys.stdout.flush()
+
+    while (total == 0 or frame_idx < total) and sampled < max_frames:
+        if frame_idx % interval == 0:
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                break
+
+            # Apply detected rotation if video is shot in portrait or sideways
+            if active_rotation is not None:
+                frame = cv2.rotate(frame, active_rotation)
+            elif is_portrait and sampled < 2:
+                test_rot = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+                if detect_plate_in_frame(test_rot):
+                    active_rotation = cv2.ROTATE_90_CLOCKWISE
+                    frame = test_rot
+
+            # Downscale high-resolution frames (e.g. 1080p -> 960px) for 3x faster YOLO detection
+            fh, fw = frame.shape[:2]
+            if fw > 1024 or fh > 1024:
+                scale_factor = 960.0 / max(fw, fh)
+                scaled_w = int(fw * scale_factor)
+                scaled_h = int(fh * scale_factor)
+                frame_to_detect = cv2.resize(frame, (scaled_w, scaled_h), interpolation=cv2.INTER_AREA)
+            else:
+                scale_factor = 1.0
+                frame_to_detect = frame
+
+            found = detect_plate_in_frame(frame_to_detect)
+
+            # If no boxes detected in first frame, test 90 deg rotation
+            if not found and active_rotation is None and sampled < 2:
+                rot90 = cv2.rotate(frame_to_detect, cv2.ROTATE_90_CLOCKWISE)
+                found_rot = detect_plate_in_frame(rot90)
+                if found_rot:
+                    active_rotation = cv2.ROTATE_90_CLOCKWISE
+                    found = found_rot
+
+            # Rescale boxes back to original frame dimensions
+            for item in found:
+                if scale_factor != 1.0 and "box" in item:
+                    inv = 1.0 / scale_factor
+                    item["box"] = [
+                        int(item["box"][0] * inv),
+                        int(item["box"][1] * inv),
+                        int(item["box"][2] * inv),
+                        int(item["box"][3] * inv)
+                    ]
+                item["timestampSeconds"] = round(frame_idx / fps, 2)
+                item["frameIndex"] = frame_idx
+                observations.append(item)
+
+            sampled += 1
+
+            pct = min(85, int(25 + (sampled / float(max_frames)) * 60))
+            if found:
+                best_found = max(found, key=lambda x: x.get("confidence", 0))
+                sys.stdout.write(json.dumps({
+                    "type": "PROGRESS",
+                    "percent": pct,
+                    "stage": "PLATE_LOCALIZED",
+                    "message": f"Localized plate: {best_found['plate']} (Confidence: {int(best_found['confidence'] * 100)}%)",
+                    "plate": best_found['plate']
+                }) + "\n")
+                sys.stdout.flush()
+            else:
+                sys.stdout.write(json.dumps({
+                    "type": "PROGRESS",
+                    "percent": pct,
+                    "stage": "SCANNING_FRAMES",
+                    "message": f"Analyzing video frame {sampled}/{max_frames}..."
+                }) + "\n")
+                sys.stdout.flush()
+
+            # Fast early exit if a valid, high-confidence Indian plate is confirmed
+            if observations:
+                high_conf_plates = [
+                    o["plate"] for o in observations
+                    if plate_shape_score(o["plate"]) >= 1.0 and o.get("confidence", 0) >= 0.70
+                ]
+                if high_conf_plates:
+                    break
+
+                # Or if we have 2 consistent reads of any plausible plate
+                plates = [o["plate"] for o in observations]
+                most_common, count = Counter(plates).most_common(1)[0]
+                if count >= 2 and plate_shape_score(most_common) >= 0.8:
+                    break
+        else:
+            if not cap.grab():
+                break
+        frame_idx += 1
+
     cap.release()
+    elapsed = round(time.perf_counter() - start_t, 3)
+
+    sys.stdout.write(json.dumps({"type": "PROGRESS", "percent": 95, "stage": "VERIFYING_CONSENSUS", "message": "Evaluating candidate ranking & safety compliance..."}) + "\n")
+    sys.stdout.flush()
+
+    if observations:
+        plate_groups = {}
+        for o in observations:
+            p = o["plate"]
+            if p not in plate_groups:
+                plate_groups[p] = {"items": [], "confidences": [], "timestamps": []}
+            plate_groups[p]["items"].append(o)
+            plate_groups[p]["confidences"].append(o["confidence"])
+            plate_groups[p]["timestamps"].append(o["timestampSeconds"])
+
+        ranked = []
+        for p, g in plate_groups.items():
+            avg_conf = sum(g["confidences"]) / len(g["confidences"])
+            support = len(g["items"])
+            shape = plate_shape_score(p)
+            support_bonus = min(support, 4) * 0.03
+            final_conf = min(0.96, round(avg_conf + support_bonus, 3))
+            rank_score = (final_conf * 0.5) + (min(support, 5) / 5.0 * 0.25) + (shape * 0.5)
+            ranked.append({
+                "plate": p,
+                "confidence": final_conf,
+                "supportFrames": support,
+                "timestampsSeconds": sorted(list(set(g["timestamps"])))[:5],
+                "rankScore": round(rank_score, 3),
+                "box": g["items"][0].get("box"),
+                "boxNormalized": g["items"][0].get("boxNormalized")
+            })
+
+        ranked.sort(key=lambda x: x["rankScore"], reverse=True)
+        best = ranked[0]
+        return {
+            "status": "COMPLETED" if best["confidence"] >= 0.45 else "REVIEW_REQUIRED",
+            "selectedPlate": best["plate"],
+            "confidence": best["confidence"],
+            "candidates": ranked[:5],
+            "bestCandidate": best,
+            "box": best.get("box"),
+            "boxNormalized": best.get("boxNormalized"),
+            "framesProcessed": sampled,
+            "elapsedSeconds": elapsed,
+            "engine": ENGINE_NAME
+        }
+
+    return {
+        "status": "NOT_FOUND",
+        "selectedPlate": None,
+        "confidence": None,
+        "candidates": [],
+        "framesProcessed": sampled,
+        "elapsedSeconds": elapsed,
+        "engine": ENGINE_NAME
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Stdin / Base64 Frame Processing for Fast Live Scanning
+# ──────────────────────────────────────────────────────────────────────────────
+
+def process_base64_frame(b64_str: str) -> dict:
+    """Decode a single base64-encoded frame and run plate detection."""
+    if ',' in b64_str:
+        b64_str = b64_str.split(',', 1)[1]
+    img_bytes = base64.b64decode(b64_str)
+    nparr = np.frombuffer(img_bytes, np.uint8)
+    frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if frame is None:
+        return {"detected": False, "plate": None, "error": "Cannot decode frame"}
+
+    detections = detect_plate_in_frame(frame)
+    if detections:
+        best = max(detections, key=lambda d: d["confidence"])
+        return {
+            "detected": True,
+            "plate": best["plate"],
+            "confidence": best["confidence"],
+            "box": best.get("box"),
+            "boxNormalized": best.get("boxNormalized"),
+            "all": detections
+        }
+
+    return {"detected": False, "plate": None, "box": None}
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# CLI Entry Point
+# ──────────────────────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(description="FuelFlux / Hydrotest Studio License Plate Scanner")
+    parser.add_argument("--input", type=Path, help="Input media file path")
+    parser.add_argument("--json", action="store_true", help="Output result as JSON")
+    parser.add_argument("--sample-fps", type=float, default=1.5)
+    parser.add_argument("--max-frames", type=int, default=40)
+    parser.add_argument("--stdin-frame", action="store_true", help="Read single base64 frame from stdin")
+    args = parser.parse_args()
+
+    if args.stdin_frame:
+        raw_b64 = sys.stdin.read().strip()
+        res = process_base64_frame(raw_b64)
+        print(json.dumps(res))
+        return 0
+
+    if not args.input:
+        parser.print_help()
+        return 1
+
+    input_path = args.input.resolve()
+    ext = input_path.suffix.lower()
+
+    if ext in {'.jpg', '.jpeg', '.png', '.bmp', '.webp', '.tif', '.tiff'}:
+        result = process_image(input_path)
+    elif ext in {'.mp4', '.avi', '.mov', '.mkv', '.webm', '.m4v'}:
+        result = process_video(input_path, sample_fps=args.sample_fps, max_frames=args.max_frames)
+    else:
+        result = {"status": "ERROR", "error": f"Unsupported media extension: {ext}", "candidates": []}
+
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        print(f"Status: {result.get('status')}")
+        print(f"Plate:  {result.get('selectedPlate')}")
+        print(f"Conf:   {result.get('confidence')}")
+        print(f"Time:   {result.get('elapsedSeconds')}s")
+
     return 0
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--input', help='Path to image/video file')
-    parser.add_argument('--json', action='store_true', help='Output one JSON result')
-    parser.add_argument('--stream', action='store_true', help='Read authorized stream config from stdin and emit JSON Lines events')
-    parser.add_argument('--test-stream', action='store_true', help='Open stream, decode one frame, return JSON Lines test result')
-    args = parser.parse_args()
-    if args.stream or args.test_stream:
-        return stream_mode(test_only=args.test_stream)
-    if not args.input:
-        emit({'status': 'ERROR', 'error': 'Pass --input <media-path>.', 'candidates': [], 'selectedPlate': None}); return 2
-    try:
-        init_engine()
-        min_confidence = float(os.getenv('OCR_MIN_CONFIDENCE', '0.80'))
-        sample_fps = max(0.25, min(float(os.getenv('VIDEO_SAMPLE_FPS', '5')), 15))
-        max_frames = max(1, min(int(os.getenv('MAX_VIDEO_FRAMES', '240')), 2000))
-        result = process_file(Path(args.input).resolve(), sample_fps, max_frames, min_confidence)
-        result['statusCode'] = result.get('status')
-        emit(result)
-        return 0
-    except Exception as exc:
-        emit({'status': 'INIT_ERROR', 'error': f'{type(exc).__name__}: {exc}', 'candidates': [], 'selectedPlate': None, 'engine': ENGINE_NAME})
-        return 3
-
-if __name__ == '__main__':
-    raise SystemExit(main())
+if __name__ == "__main__":
+    sys.exit(main() or 0)

@@ -9,12 +9,8 @@
     "dev": "node --watch src/server.js",
     "seed": "node scripts/seed-demo.js",
     "test": "node --test tests/*.test.js",
-    "check": "node --check src/server.js && node --check src/app.js && node --check src/domain.js && node --check src/scanner.js && node --check src/camera-manager.js && node --check src/services/verification.js && node --check public/js/app.js && node --check scripts/seed-demo.js && node --check scripts/inventory-media.js && node --check scripts/check-vehicle-record.js && npm test",
-    "inventory": "node scripts/inventory-media.js",
-    "setup:model": "python scripts/setup-indian-ocr.py",
-    "test:python": "python -m unittest discover -s cv_worker/tests",
-    "check:plate": "node scripts/check-vehicle-record.js",
-    "benchmark:alpr": "python scripts/benchmark_alpr.py"
+    "test:python": "node -e \"const cp = require('child_process'), cfg = require('./src/config'); const res = cp.spawnSync(cfg.pythonExecutable, ['-m', 'unittest', 'discover', '-s', 'cv_worker/tests'], { stdio: 'inherit' }); process.exit(res.status || 0);\"",
+    "check": "node --check src/server.js && node --check src/app.js && node --check src/domain.js && node --check src/scanner.js && node --check src/services/verification.js && node --check public/js/app.js && node --check scripts/seed-demo.js && npm test"
   },
   "engines": {
     "node": ">=20"

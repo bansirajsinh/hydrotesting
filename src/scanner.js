@@ -17,7 +17,9 @@ function parseWorkerJson(stdout) {
     if (!line.startsWith('{')) continue;
     try {
       const value = JSON.parse(line);
-      if (value && typeof value === 'object' && !Array.isArray(value)) return value;
+      if (value && typeof value === 'object' && !Array.isArray(value) && value.type !== 'PROGRESS') {
+        return value;
+      }
     } catch {
       // Model/runtime libraries may print diagnostics. Continue to the last JSON line.
     }
@@ -39,7 +41,7 @@ function safeWorkerError(parsed, stderr, code) {
   return parts.join(' | ');
 }
 
-function runScan(filePath, timeoutMs = 240000) {
+function runScan(filePath, onProgress = null, timeoutMs = 120000) {
   return new Promise((resolve, reject) => {
     if (!filePath || !fs.existsSync(filePath)) {
       reject(new Error('Uploaded media file is not present on the server.'));
@@ -47,7 +49,13 @@ function runScan(filePath, timeoutMs = 240000) {
     }
 
     const absolutePath = path.resolve(filePath);
-    const args = [config.workerScript, '--input', absolutePath, '--json'];
+    const args = [
+      config.workerScript,
+      '--input', absolutePath,
+      '--json',
+      '--sample-fps', String(process.env.VIDEO_SAMPLE_FPS || '2.0'),
+      '--max-frames', String(process.env.MAX_VIDEO_FRAMES || '15')
+    ];
     let child;
     try {
       child = spawn(config.pythonExecutable, args, {
@@ -77,13 +85,28 @@ function runScan(filePath, timeoutMs = 240000) {
       if (settled) return;
       child.kill('SIGTERM');
       finish(reject, new Error(
-        'Plate scan timed out. Try a shorter video, reduce VIDEO_SAMPLE_FPS/MAX_VIDEO_FRAMES, or increase the worker timeout.'
+        'Plate scan timed out. Try a shorter video or check system load.'
       ));
     }, timeoutMs);
 
     child.stdout.on('data', (chunk) => {
       if (settled) return;
-      stdout += chunk.toString();
+      const text = chunk.toString();
+      stdout += text;
+
+      if (typeof onProgress === 'function') {
+        const lines = text.split(/\r?\n/);
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (trimmed.startsWith('{"type":"PROGRESS"') || trimmed.startsWith('{"type": "PROGRESS"')) {
+            try {
+              const p = JSON.parse(trimmed);
+              onProgress(p);
+            } catch {}
+          }
+        }
+      }
+
       if (Buffer.byteLength(stdout, 'utf8') > MAX_STDOUT_BYTES) {
         outputOverflow = true;
         child.kill('SIGTERM');
@@ -113,8 +136,6 @@ function runScan(filePath, timeoutMs = 240000) {
 
       const parsed = parseWorkerJson(stdout);
       if (code !== 0) {
-        // scan_media.py returns structured JSON even for initialization errors.
-        // Parse that JSON before rejecting so users see the real missing model/dependency.
         finish(reject, new Error(
           `Plate scanner failed (exit code ${code}${signal ? `, signal ${signal}` : ''}): ` +
           safeWorkerError(parsed, stderr, code)
@@ -141,3 +162,4 @@ function runScan(filePath, timeoutMs = 240000) {
 }
 
 module.exports = { runScan, parseWorkerJson, safeWorkerError };
+

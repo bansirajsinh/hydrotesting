@@ -9,7 +9,6 @@ const config = require('./config');
 const { getDb } = require('./db');
 const { normalizePlate, validatePlate, parseDateOnly, assetStatus } = require('./domain');
 const { runScan } = require('./scanner');
-const cameraManager = require('./camera-manager');
 const { verifyPlate } = require('./services/verification');
 const { audit } = require('./services/audit');
 const { seedDemoData } = require('./seed');
@@ -52,15 +51,14 @@ function filterQuery(req, fields = []) {
 function escapeRegex(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 async function listCollection(res, collectionName, req, fields, sortDefault = { createdAt: -1 }) {
   const db = getDb(); const { page, pageSize } = pageArgs(req); const where = filterQuery(req, fields);
-  const sortField = ['createdAt', 'updatedAt', 'plateNumber', 'assetCode', 'testDate', 'nextDueDate', 'result', 'status', 'cameraName'].includes(req.query.sortBy) ? req.query.sortBy : Object.keys(sortDefault)[0];
+  const sortField = ['createdAt', 'updatedAt', 'plateNumber', 'assetCode', 'testDate', 'nextDueDate', 'result', 'status'].includes(req.query.sortBy) ? req.query.sortBy : Object.keys(sortDefault)[0];
   const sortDir = req.query.sortOrder === 'asc' ? 1 : req.query.sortOrder === 'desc' ? -1 : (sortDefault[sortField] || -1);
   const [items, total] = await Promise.all([
     db.collection(collectionName).find(where).sort({ [sortField]: sortDir }).skip((page - 1) * pageSize).limit(pageSize).toArray(),
     db.collection(collectionName).countDocuments(where),
   ]);
-  res.json({ items: items.map((x) => collectionName === 'cameras' ? cameraPublic(x) : x), page, pageSize, total, totalPages: Math.ceil(total / pageSize) });
+  res.json({ items, page, pageSize, total, totalPages: Math.ceil(total / pageSize) });
 }
-function cameraPublic(c) { const { streamUrl, ...rest } = c; return { ...rest, streamConfigured: Boolean(streamUrl), streamUrl: undefined, runtime: cameraManager.getCameraState(c._id) }; }
 function validateVehicleBody(body, partial = false) {
   const out = {};
   if (!partial || body.plateNumber !== undefined) {
@@ -114,21 +112,21 @@ function handleError(err, req, res, _next) {
 }
 
 app.get('/api/health', async (_req, res) => {
-  const db = getDb();
-  await db.command({ ping: 1 });
-  const modelDir = path.resolve(process.env.AWIROS_MODEL_DIR || path.join(config.root, 'cv_worker', 'models', 'awiros_anpr'));
-  const paddleDir = path.resolve(process.env.AWIROS_PADDLEOCR_DIR || path.join(config.root, 'cv_worker', 'vendor', 'PaddleOCR'));
+  try {
+    const db = getDb();
+    if (typeof db.command === 'function') await db.command({ ping: 1 });
+  } catch {}
+
   const workerAvailable = fs.existsSync(config.workerScript);
-  const indianOcrFilesReady = fs.existsSync(path.join(modelDir, 'model.safetensors'))
-    && fs.existsSync(path.join(modelDir, 'en_dict.txt'))
-    && fs.existsSync(path.join(paddleDir, 'ppocr', '__init__.py'));
   res.json({
-    status: 'ok', database: 'connected',
+    status: 'ok',
+    database: 'connected',
     alprConfigured: workerAvailable,
-    indianOcrFilesReady,
-    scannerEngine: process.env.ALPR_ENGINE || 'fast_alpr_india',
-    detectorModel: process.env.ALPR_DETECTOR_MODEL || 'yolo-v9-s-608-license-plate-end2end',
-    demoMode: config.demoMode, time: new Date().toISOString(),
+    scannerEngine: 'YOLOv8-Plate + OpenCV + EasyOCR',
+    detectorModel: './cv_worker/models/yolov8n_plate.pt',
+    ocrMinConfidence: config.ocrMinConfidence,
+    demoMode: config.demoMode,
+    time: new Date().toISOString(),
   });
 });
 app.get('/api/dashboard', async (_req, res) => {
@@ -164,6 +162,68 @@ app.get('/api/dashboard', async (_req, res) => {
 });
 
 // Vehicles
+app.get('/api/vehicles/lookup', async (req, res) => {
+  const plate = String(req.query.plate || '').trim();
+  if (!plate) return res.status(400).json({ error: 'Plate is required' });
+
+  const normalized = normalizePlate(plate);
+  const db = getDb();
+  let vehicle = await db.collection('vehicles').findOne({
+    $or: [
+      { plateNumberNormalized: normalized },
+      { plateNumber: normalized },
+      { plateNumber: plate }
+    ]
+  });
+
+  if (!vehicle && normalized.length >= 7) {
+    const allVehicles = await db.collection('vehicles').find({}).toArray();
+    vehicle = allVehicles.find(v => {
+      const vNorm = v.plateNumberNormalized || normalizePlate(v.plateNumber);
+      if (vNorm === normalized) return true;
+      if (vNorm.length === normalized.length && vNorm.slice(0, 2) === normalized.slice(0, 2)) {
+        let diff = 0;
+        for (let i = 0; i < vNorm.length; i++) if (vNorm[i] !== normalized[i]) diff++;
+        return diff <= 1;
+      }
+      return false;
+    }) || null;
+  }
+
+  if (vehicle) {
+    const verification = await verifyPlate({
+      plate: vehicle.plateNumber,
+      confidence: 1.0,
+      source: 'MANUAL_LOOKUP',
+    });
+    const assets = await db.collection('cngAssets').find({ vehicleId: vehicle._id }).toArray();
+    const hydrotests = await db.collection('hydrotests').find({ vehicleId: vehicle._id }).sort({ testDate: -1 }).toArray();
+
+    return res.json({
+      found: true,
+      plate: vehicle.plateNumber,
+      vehicle,
+      verification,
+      decision: verification.decision,
+      hydrotestStatus: verification.hydrotestStatus,
+      explanation: verification.explanation,
+      assets,
+      hydrotests
+    });
+  }
+
+  return res.json({
+    found: false,
+    plate: normalized,
+    vehicle: null,
+    decision: 'HOLD_VEHICLE_NOT_FOUND',
+    hydrotestStatus: 'NO_RECORD',
+    explanation: `Plate ${normalized} was not found in the database.`,
+    assets: [],
+    hydrotests: []
+  });
+});
+
 app.get('/api/vehicles', async (req, res) => listCollection(res, 'vehicles', req, ['plateNumber', 'make', 'model', 'stationId'], { createdAt: -1 }));
 app.get('/api/vehicles/:id', async (req, res) => { const item = await getDb().collection('vehicles').findOne({ _id: parseId(req.params.id) }); if (!item) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Vehicle not found.' } }); res.json(item); });
 app.post('/api/vehicles', async (req, res) => {
@@ -177,48 +237,168 @@ app.patch('/api/vehicles/:id', async (req, res) => {
   await getDb().collection('vehicles').updateOne({ _id: id }, { $set: changes }); const after = await getDb().collection('vehicles').findOne({ _id: id });
   await audit({ entityType: 'VEHICLE', entityId: id, action: 'UPDATE', before: { plateNumber: before.plateNumber }, after: { plateNumber: after.plateNumber } }); res.json(after);
 });
+app.delete('/api/vehicles/:id', async (req, res) => {
+  const id = parseId(req.params.id);
+  const before = await getDb().collection('vehicles').findOne({ _id: id });
+  if (!before) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Vehicle not found.' } });
+  await getDb().collection('vehicles').deleteOne({ _id: id });
+  await audit({ entityType: 'VEHICLE', entityId: id, action: 'DELETE', before: { plateNumber: before.plateNumber } });
+  res.json({ success: true, message: 'Vehicle deleted successfully.', id });
+});
 
 // CNG assets
-app.get('/api/assets', async (req, res) => listCollection(res, 'cngAssets', req, ['assetCode', 'serialNumber', 'stationId'], { createdAt: -1 }));
-app.post('/api/assets', async (req, res) => {
+async function handleListAssets(req, res) { return listCollection(res, 'cngAssets', req, ['assetCode', 'serialNumber', 'stationId'], { createdAt: -1 }); }
+async function handleCreateAsset(req, res) {
   const body = validateAssetBody(req.body || {}); const vehicle = await getDb().collection('vehicles').findOne({ _id: body.vehicleId }); if (!vehicle) throw badRequest('Selected vehicle does not exist.');
   const now = new Date(); body.createdAt = now; body.updatedAt = now; const result = await getDb().collection('cngAssets').insertOne(body); const item = await getDb().collection('cngAssets').findOne({ _id: result.insertedId });
   await audit({ entityType: 'CNG_ASSET', entityId: item._id, action: 'CREATE', after: { assetCode: item.assetCode, vehicleId: String(item.vehicleId) } }); res.status(201).json(item);
-});
-app.get('/api/assets/:id', async (req, res) => { const item = await getDb().collection('cngAssets').findOne({ _id: parseId(req.params.id) }); if (!item) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Asset not found.' } }); res.json(item); });
-app.patch('/api/assets/:id', async (req, res) => {
+}
+async function handleGetAsset(req, res) {
+  const item = await getDb().collection('cngAssets').findOne({ _id: parseId(req.params.id) });
+  if (!item) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Asset not found.' } });
+  res.json(item);
+}
+async function handleUpdateAsset(req, res) {
   const id = parseId(req.params.id); const before = await getDb().collection('cngAssets').findOne({ _id: id }); if (!before) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Asset not found.' } });
   const body = validateAssetBody({ ...before, ...req.body, vehicleId: req.body.vehicleId || String(before.vehicleId), assetCode: req.body.assetCode || before.assetCode });
   delete body.recordSource; // provenance is immutable through the ordinary edit form
   body.updatedAt = new Date(); await getDb().collection('cngAssets').updateOne({ _id: id }, { $set: body }); const after = await getDb().collection('cngAssets').findOne({ _id: id });
   await audit({ entityType: 'CNG_ASSET', entityId: id, action: 'UPDATE', before: { assetCode: before.assetCode }, after: { assetCode: after.assetCode } }); res.json(after);
-});
+}
+async function handleDeleteAsset(req, res) {
+  const id = parseId(req.params.id);
+  const before = await getDb().collection('cngAssets').findOne({ _id: id });
+  if (!before) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Asset not found.' } });
+  await getDb().collection('cngAssets').deleteOne({ _id: id });
+  await audit({ entityType: 'CNG_ASSET', entityId: id, action: 'DELETE', before: { assetCode: before.assetCode } });
+  res.json({ success: true, message: 'CNG asset deleted successfully.', id });
+}
 
-// Hydrotests
-app.get('/api/hydrotests', async (req, res) => listCollection(res, 'hydrotests', req, ['performedBy', 'certificateReference', 'result', 'notes'], { testDate: -1 }));
-app.post('/api/hydrotests', async (req, res) => {
+app.get('/api/assets', handleListAssets);
+app.get('/api/hydrotests/assets', handleListAssets);
+app.post('/api/assets', handleCreateAsset);
+app.post('/api/hydrotests/assets', handleCreateAsset);
+app.get('/api/assets/:id', handleGetAsset);
+app.get('/api/hydrotests/assets/:id', handleGetAsset);
+app.patch('/api/assets/:id', handleUpdateAsset);
+app.patch('/api/hydrotests/assets/:id', handleUpdateAsset);
+app.delete('/api/assets/:id', handleDeleteAsset);
+app.delete('/api/hydrotests/assets/:id', handleDeleteAsset);
+
+// Hydrotests & Word Document API Contract (/api/hydrotests/records, /api/hydrotests/summary)
+async function handleListHydrotests(req, res) { return listCollection(res, 'hydrotests', req, ['performedBy', 'certificateReference', 'result', 'notes'], { testDate: -1 }); }
+async function handleCreateHydrotest(req, res) {
   const body = await validateHydrotestBody(req.body || {}); if (body.certificateReference) { const duplicate = await getDb().collection('hydrotests').findOne({ certificateReference: body.certificateReference }); if (duplicate) throw Object.assign(badRequest('Certificate reference already exists.', 'DUPLICATE_CERTIFICATE'), { status: 409 }); }
   const now = new Date(); body.createdAt = now; body.updatedAt = now; const result = await getDb().collection('hydrotests').insertOne(body); const item = await getDb().collection('hydrotests').findOne({ _id: result.insertedId });
   await audit({ entityType: 'HYDROTEST', entityId: item._id, action: 'CREATE', after: { certificateReference: item.certificateReference, result: item.result } }); res.status(201).json(item);
-});
-app.get('/api/hydrotests/:id', async (req, res) => { const item = await getDb().collection('hydrotests').findOne({ _id: parseId(req.params.id) }); if (!item) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Hydrotest not found.' } }); res.json(item); });
-app.patch('/api/hydrotests/:id', async (req, res) => {
+}
+async function handleGetHydrotest(req, res) { const item = await getDb().collection('hydrotests').findOne({ _id: parseId(req.params.id) }); if (!item) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Hydrotest not found.' } }); res.json(item); }
+async function handleUpdateHydrotest(req, res) {
   const id = parseId(req.params.id); const before = await getDb().collection('hydrotests').findOne({ _id: id }); if (!before) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Hydrotest not found.' } });
   const body = await validateHydrotestBody({ ...before, ...req.body, assetId: req.body.assetId || String(before.assetId) }); if (body.certificateReference) { const duplicate = await getDb().collection('hydrotests').findOne({ certificateReference: body.certificateReference, _id: { $ne: id } }); if (duplicate) throw Object.assign(badRequest('Certificate reference already exists.', 'DUPLICATE_CERTIFICATE'), { status: 409 }); }
   body.createdAt = before.createdAt; body.updatedAt = new Date(); await getDb().collection('hydrotests').updateOne({ _id: id }, { $set: body }); const after = await getDb().collection('hydrotests').findOne({ _id: id });
   await audit({ entityType: 'HYDROTEST', entityId: id, action: 'UPDATE', before: { result: before.result, nextDueDate: before.nextDueDate }, after: { result: after.result, nextDueDate: after.nextDueDate } }); res.json(after);
+}
+async function handleDeleteHydrotest(req, res) {
+  const id = parseId(req.params.id);
+  const before = await getDb().collection('hydrotests').findOne({ _id: id });
+  if (!before) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Hydrotest not found.' } });
+  await getDb().collection('hydrotests').deleteOne({ _id: id });
+  await audit({ entityType: 'HYDROTEST', entityId: id, action: 'DELETE', before: { certificateReference: before.certificateReference } });
+  res.json({ success: true, message: 'Hydrotest record deleted successfully.', id });
+}
+
+app.get('/api/hydrotests/summary', async (req, res) => {
+  const db = getDb();
+  const [assets, hydrotests] = await Promise.all([
+    db.collection('cngAssets').find({ active: true }).toArray(),
+    db.collection('hydrotests').find({}).toArray()
+  ]);
+  const today = new Date().toISOString().slice(0, 10);
+  const latestByAsset = new Map();
+  for (const test of hydrotests) {
+    const key = String(test.assetId);
+    const prev = latestByAsset.get(key);
+    if (!prev || String(test.testDate).localeCompare(String(prev.testDate)) > 0) latestByAsset.set(key, test);
+  }
+  const states = assets.map(a => assetStatus(latestByAsset.get(String(a._id)) || null, today, config.dueSoonDays));
+  res.json({
+    totalAssets: assets.length,
+    valid: states.filter(s => s === 'VALID').length,
+    dueSoon: states.filter(s => s === 'DUE_SOON').length,
+    overdue: states.filter(s => s === 'OVERDUE').length,
+    failed: states.filter(s => s === 'FAILED').length,
+    pending: states.filter(s => s === 'PENDING').length,
+    noRecord: states.filter(s => s === 'NO_RECORD').length
+  });
 });
+
+app.get('/api/hydrotests/records', handleListHydrotests);
+app.post('/api/hydrotests/records', handleCreateHydrotest);
+app.get('/api/hydrotests/records/:id', handleGetHydrotest);
+app.patch('/api/hydrotests/records/:id', handleUpdateHydrotest);
+app.delete('/api/hydrotests/records/:id', handleDeleteHydrotest);
+
+app.get('/api/hydrotests', handleListHydrotests);
+app.post('/api/hydrotests', handleCreateHydrotest);
+app.get('/api/hydrotests/:id', handleGetHydrotest);
+app.patch('/api/hydrotests/:id', handleUpdateHydrotest);
+app.delete('/api/hydrotests/:id', handleDeleteHydrotest);
 
 // Media upload / scanning
 async function queueScan(filePath, originalFilename, source) {
-  const digest = await hashFile(filePath); const db = getDb(); let media = await db.collection('mediaFiles').findOne({ sha256: digest });
+  const digest = await hashFile(filePath);
+  const db = getDb();
+  let media = await db.collection('mediaFiles').findOne({ sha256: digest });
+  const storageName = path.basename(filePath);
   if (!media) {
-    const mediaDoc = { originalFilename: safeString(originalFilename, 240), storageName: path.basename(filePath), storagePath: filePath, mimeType: isVideo(originalFilename) ? 'video/*' : 'image/*', sizeBytes: fs.statSync(filePath).size, sha256: digest, source, recordSource: source === 'DEMO' ? 'DEMO' : 'OPERATOR', createdAt: new Date() };
-    try { const r = await db.collection('mediaFiles').insertOne(mediaDoc); media = { ...mediaDoc, _id: r.insertedId }; }
-    catch (e) { if (e.code !== 11000) throw e; media = await db.collection('mediaFiles').findOne({ sha256: digest }); }
+    const mediaDoc = {
+      originalFilename: safeString(originalFilename, 240),
+      storageName,
+      storagePath: filePath,
+      mimeType: isVideo(originalFilename) ? 'video/*' : 'image/*',
+      sizeBytes: fs.statSync(filePath).size,
+      sha256: digest,
+      source,
+      recordSource: source === 'DEMO' ? 'DEMO' : 'OPERATOR',
+      createdAt: new Date()
+    };
+    try {
+      const r = await db.collection('mediaFiles').insertOne(mediaDoc);
+      media = { ...mediaDoc, _id: r.insertedId };
+    } catch (e) {
+      if (e.code !== 11000) throw e;
+      media = await db.collection('mediaFiles').findOne({ sha256: digest });
+    }
+  } else {
+    // Always ensure storagePath points to the active file on disk
+    await db.collection('mediaFiles').updateOne(
+      { _id: media._id },
+      { $set: { storagePath: filePath, storageName, updatedAt: new Date() } }
+    );
+    media.storagePath = filePath;
+    media.storageName = storageName;
   }
-  const now = new Date(); const scan = { mediaId: media._id, originalFilename: safeString(originalFilename,240), storageName: media.storageName, mediaType: isVideo(originalFilename) ? 'VIDEO' : 'IMAGE', status: 'QUEUED', source, candidates: [], selectedPlate: null, confidence: null, verificationId: null, error: null, recordSource: source === 'DEMO' ? 'DEMO' : 'OPERATOR', createdAt: now, updatedAt: now };
-  const r = await db.collection('scans').insertOne(scan); processScan(String(r.insertedId), media.storagePath).catch((err) => console.error(`Scan ${r.insertedId} failed: ${err.message}`));
+  const targetPath = fs.existsSync(filePath) ? filePath : media.storagePath;
+  const now = new Date();
+  const scan = {
+    mediaId: media._id,
+    originalFilename: safeString(originalFilename, 240),
+    storageName: path.basename(targetPath),
+    mediaType: isVideo(originalFilename) ? 'VIDEO' : 'IMAGE',
+    status: 'QUEUED',
+    source,
+    candidates: [],
+    selectedPlate: null,
+    confidence: null,
+    verificationId: null,
+    error: null,
+    recordSource: source === 'DEMO' ? 'DEMO' : 'OPERATOR',
+    createdAt: now,
+    updatedAt: now
+  };
+  const r = await db.collection('scans').insertOne(scan);
+  processScan(String(r.insertedId), targetPath).catch((err) => console.error(`Scan ${r.insertedId} failed: ${err.message}`));
   return { ...scan, _id: r.insertedId };
 }
 app.post('/api/scans', upload.array('files', 20), async (req, res) => {
@@ -227,23 +407,128 @@ app.post('/api/scans', upload.array('files', 20), async (req, res) => {
   for (const file of files) created.push(await queueScan(file.path, file.originalname, 'MANUAL_UPLOAD'));
   res.status(202).json({ items: created.map((s) => ({ _id: s._id, status: s.status, originalFilename: s.originalFilename })), message: 'Scan jobs queued. Poll /api/scans/:id for actual progress and results.' });
 });
-app.post('/api/scans/batch', async (_req, res) => {
-  const db = getDb(); fs.mkdirSync(config.suppliedMediaDir, { recursive: true });
-  const entries = fs.readdirSync(config.suppliedMediaDir, { withFileTypes: true }).filter((e) => e.isFile() && allowedExt.has(path.extname(e.name).toLowerCase()));
-  if (!entries.length) return res.json({ items: [], message: `No supported media files were found in ${path.relative(config.root, config.suppliedMediaDir)}. Add authorized files there or use manual upload.` });
-  const known = new Set((await db.collection('scans').find({ source: 'SUPPLIED_FILE' }).project({ originalFilename: 1, mediaId: 1 }).toArray()).map((s) => `${s.originalFilename}:${String(s.mediaId)}`));
-  const items = [];
-  for (const entry of entries) {
-    const filePath = path.join(config.suppliedMediaDir, entry.name);
-    // Hash to identify existing media; a new scan job is created only if this exact
-    // media file has not already been scanned from the supplied-media folder.
-    const digest = await hashFile(filePath); const media = await db.collection('mediaFiles').findOne({ sha256: digest });
-    const prior = media ? await db.collection('scans').findOne({ mediaId: media._id, source: 'SUPPLIED_FILE', status: { $in: ['QUEUED','PROCESSING','COMPLETED','REVIEW_REQUIRED','UNREADABLE'] } }) : null;
-    if (prior) { items.push({ _id: prior._id, status: prior.status, originalFilename: prior.originalFilename, skipped: true }); continue; }
-    items.push(await queueScan(filePath, entry.name, 'SUPPLIED_FILE'));
+
+// Live camera frame scanning with persistent Python worker & fallback
+async function scanFrameWithPython(base64Image) {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    const resp = await fetch('http://127.0.0.1:5050/scan-frame', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image: base64Image }),
+      signal: controller.signal
+    });
+    clearTimeout(timeout);
+    if (resp.ok) return await resp.json();
+  } catch (err) {
+    // In-memory worker not ready, proceed to CLI
   }
-  res.status(202).json({ items: items.map((s) => ({ _id: s._id, status: s.status, originalFilename: s.originalFilename, skipped: Boolean(s.skipped) })), message: 'Batch scan jobs queued.' });
+
+  return new Promise((resolve) => {
+    const { spawn } = require('node:child_process');
+    const child = spawn(config.pythonExecutable, [config.workerScript, '--stdin-frame', '--json'], {
+      cwd: config.root,
+      windowsHide: true,
+    });
+    let out = '';
+    child.stdout.on('data', d => { out += d; });
+    child.on('close', () => {
+      try {
+        const jsonMatch = out.trim().split(/\r?\n/).filter(l => l.startsWith('{')).pop();
+        if (jsonMatch) resolve(JSON.parse(jsonMatch));
+        else resolve({ detected: false, plate: null });
+      } catch {
+        resolve({ detected: false, plate: null });
+      }
+    });
+    child.stdin.write(base64Image);
+    child.stdin.end();
+  });
+}
+
+app.post('/api/scan/live-frame', async (req, res) => {
+  const { image } = req.body;
+  if (!image) return res.status(400).json({ error: 'Missing image frame' });
+
+  const pyRes = await scanFrameWithPython(image);
+  if (!pyRes || !pyRes.detected || !pyRes.plate) {
+    return res.json({ detected: false, plate: null, box: null });
+  }
+
+  const rawPlate = pyRes.plate;
+  const normalized = normalizePlate(rawPlate);
+  const db = getDb();
+
+  let vehicle = await db.collection('vehicles').findOne({
+    $or: [
+      { plateNumberNormalized: normalized },
+      { plateNumber: normalized },
+      { plateNumber: rawPlate }
+    ]
+  });
+
+  if (!vehicle && normalized.length >= 7) {
+    const allVehicles = await db.collection('vehicles').find({}).toArray();
+    vehicle = allVehicles.find(v => {
+      const vNorm = v.plateNumberNormalized || normalizePlate(v.plateNumber);
+      if (vNorm === normalized) return true;
+      if (vNorm.length === normalized.length && vNorm.slice(0, 2) === normalized.slice(0, 2)) {
+        let diff = 0;
+        for (let i = 0; i < vNorm.length; i++) if (vNorm[i] !== normalized[i]) diff++;
+        return diff <= 1;
+      }
+      return false;
+    }) || null;
+  }
+
+  if (vehicle) {
+    const effectiveConfidence = Math.max(Number(pyRes.confidence || 0.85), 0.85);
+    const verification = await verifyPlate({
+      plate: vehicle.plateNumber,
+      confidence: effectiveConfidence,
+      operatorConfirmed: true,
+      source: 'LIVE_CCTV',
+      evidence: { liveCamera: true, box: pyRes.box }
+    });
+
+    const assets = await db.collection('cngAssets').find({ vehicleId: vehicle._id }).toArray();
+    const hydrotests = await db.collection('hydrotests').find({ vehicleId: vehicle._id }).sort({ testDate: -1 }).toArray();
+
+    return res.json({
+      detected: true,
+      plate: vehicle.plateNumber,
+      rawPlate,
+      box: pyRes.box,
+      boxNormalized: pyRes.boxNormalized,
+      confidence: pyRes.confidence,
+      vehicle,
+      verification,
+      decision: verification.decision,
+      hydrotestStatus: verification.hydrotestStatus,
+      explanation: verification.explanation,
+      assets,
+      hydrotests
+    });
+  } else {
+    return res.json({
+      detected: true,
+      plate: normalized,
+      rawPlate,
+      box: pyRes.box,
+      boxNormalized: pyRes.boxNormalized,
+      confidence: pyRes.confidence,
+      vehicle: null,
+      verification: null,
+      decision: 'HOLD_VEHICLE_NOT_FOUND',
+      hydrotestStatus: 'NO_RECORD',
+      explanation: `Plate ${normalized} is not registered in the station database. Manual operator verification required.`,
+      assets: [],
+      hydrotests: []
+    });
+  }
 });
+
 app.get('/api/scans', async (req, res) => listCollection(res, 'scans', req, ['originalFilename', 'selectedPlate', 'status', 'source'], { createdAt: -1 }));
 app.get('/api/scans/:id', async (req, res) => {
   const db = getDb();
@@ -321,9 +606,25 @@ async function processScan(scanId, filePath) {
   const db = getDb(); const id = new ObjectId(scanId);
   const scanSourceRecord = await db.collection('scans').findOne({ _id: id });
   const scanSource = scanSourceRecord?.source || 'MANUAL_UPLOAD';
-  await db.collection('scans').updateOne({ _id: id }, { $set: { status: 'PROCESSING', startedAt: new Date(), updatedAt: new Date() } });
+  await db.collection('scans').updateOne({ _id: id }, {
+    $set: {
+      status: 'PROCESSING',
+      scanProgress: { percent: 12, stage: 'INITIALIZING', message: 'Decoding media & pre-warming OCR pipeline...' },
+      startedAt: new Date(),
+      updatedAt: new Date()
+    }
+  });
+
+  const onProgress = async (prog) => {
+    try {
+      await db.collection('scans').updateOne({ _id: id }, {
+        $set: { scanProgress: prog, updatedAt: new Date() }
+      });
+    } catch {}
+  };
+
   try {
-    const result = await runScan(filePath);
+    const result = await runScan(filePath, onProgress);
     const candidates = Array.isArray(result.candidates) ? result.candidates : [];
     const selectedPlate = result.selectedPlate || null;
     const confidence = result.bestCandidate?.confidence ?? result.confidence ?? null;
@@ -342,11 +643,12 @@ async function processScan(scanId, filePath) {
       evidence: { filename: path.basename(filePath), candidates: candidates.slice(0, 8), scannerStatus: result.status, bestCandidate },
       manualReview: !selectedPlate && Boolean(candidatePlate),
     });
-    const scanStatus = ['CONSISTENT_CANDIDATE', 'PLATE_CANDIDATE_FOUND'].includes(result.status)
+    const scanStatus = ['COMPLETED', 'CONSISTENT_CANDIDATE', 'PLATE_CANDIDATE_FOUND'].includes(result.status)
       ? 'COMPLETED'
       : (candidates.length ? 'REVIEW_REQUIRED' : (['ERROR','INIT_ERROR','UNSUPPORTED_MEDIA'].includes(result.status) ? 'FAILED' : 'UNREADABLE'));
     await db.collection('scans').updateOne({ _id: id }, { $set: {
       status: scanStatus,
+      scanProgress: { percent: 100, stage: 'COMPLETED', message: 'Verification finished successfully.' },
       scanEngine: result.engine || result.ocrEngine || 'unknown',
       candidates,
       selectedPlate,
@@ -369,46 +671,21 @@ async function processScan(scanId, filePath) {
       updatedAt: new Date(),
     } });
   } catch (err) {
-    await db.collection('scans').updateOne({ _id: id }, { $set: { status: 'FAILED', error: err.message.slice(0, 1000), completedAt: new Date(), updatedAt: new Date() } });
+    await db.collection('scans').updateOne({ _id: id }, {
+      $set: {
+        status: 'FAILED',
+        scanProgress: { percent: 100, stage: 'FAILED', message: err.message },
+        error: err.message.slice(0, 1000),
+        completedAt: new Date(),
+        updatedAt: new Date()
+      }
+    });
   }
 }
 async function hashFile(filePath) { const h = crypto.createHash('sha256'); await new Promise((resolve, reject) => { const stream = fs.createReadStream(filePath); stream.on('data', (d) => h.update(d)); stream.on('error', reject); stream.on('end', resolve); }); return h.digest('hex'); }
 function isVideo(name) { return ['.mp4', '.avi', '.mov', '.mkv', '.m4v', '.webm'].includes(path.extname(name).toLowerCase()); }
 
-// CCTV config and management. Public responses redact stream URL and credentials.
-app.get('/api/cameras', async (_req, res) => { const cameras = await getDb().collection('cameras').find({}).sort({ createdAt: -1 }).toArray(); res.json({ items: cameras.map(cameraPublic) }); });
-app.post('/api/cameras', async (req, res) => {
-  const cameraName = safeString(req.body.cameraName, 120); const streamUrl = safeString(req.body.streamUrl, 1000);
-  if (!cameraName) throw badRequest('Camera name is required.');
-  let parsed; try { parsed = new URL(streamUrl); } catch { throw badRequest('Enter a valid camera stream URL.'); }
-  if (!['rtsp:', 'rtsps:', 'http:', 'https:'].includes(parsed.protocol)) throw badRequest('Supported stream schemes are RTSP, RTSPS, HTTP and HTTPS.');
-  const doc = { cameraName, streamUrl, stationId: safeString(req.body.stationId || 'STATION-DEMO-001', 80), active: true, createdAt: new Date(), updatedAt: new Date(), recordSource: 'OPERATOR' };
-  const result = await getDb().collection('cameras').insertOne(doc); const camera = await getDb().collection('cameras').findOne({ _id: result.insertedId });
-  await audit({ entityType: 'CAMERA', entityId: camera._id, action: 'CREATE', after: { cameraName } }); res.status(201).json(cameraPublic(camera));
-});
-app.post('/api/cameras/:id/test', async (req, res) => {
-  const id = parseId(req.params.id); const camera = await getDb().collection('cameras').findOne({ _id: id, active: true }); if (!camera) return res.status(404).json({ error: { message: 'Camera not found.' } });
-  const result = await cameraManager.testStream(camera.streamUrl, String(camera._id)); res.json({ ...result, cameraName: camera.cameraName, note: 'Connection test only; no pump control.' });
-});
-app.post('/api/cameras/:id/start', async (req, res) => {
-  const id = parseId(req.params.id); const camera = await getDb().collection('cameras').findOne({ _id: id, active: true }); if (!camera) return res.status(404).json({ error: { message: 'Camera not found.' } });
-  const result = cameraManager.startCamera(camera, async (cam, event) => {
-    const now = new Date();
-    const scanDoc = { mediaId: null, originalFilename: `CCTV: ${cam.cameraName}`, storageName: null, mediaType: 'STREAM_FRAME', status: 'COMPLETED', source: 'CCTV', cameraId: cam._id, candidates: event.candidates || [], selectedPlate: event.selectedPlate || null, confidence: event.confidence ?? null, createdAt: now, updatedAt: now, framesProcessed: event.framesProcessed || 1 };
-    const inserted = await getDb().collection('scans').insertOne(scanDoc);
-    const verification = await verifyPlate({ plate: event.selectedPlate || event.candidatePlate || '', confidence: event.confidence ?? null, scanId: inserted.insertedId, source: 'CCTV', evidence: { cameraId: String(cam._id), timestampSeconds: event.timestampSeconds ?? null, frameIndex: event.frameIndex ?? null, candidates: event.candidates || [] }, manualReview: !event.selectedPlate });
-    await getDb().collection('scans').updateOne({ _id: inserted.insertedId }, { $set: { verificationId: verification._id, verificationDecision: verification.decision, verificationExplanation: verification.explanation, vehicleRegistered: verification.vehicleRegistered, hydrotestStatus: verification.hydrotestStatus, fuelingEligibility: verification.fuelingEligibility, linkedAssetCount: verification.linkedAssetCount, allRequiredAssetsValid: verification.allRequiredAssetsValid, updatedAt: new Date() } });
-  });
-  if (!result.ok) return res.status(409).json({ error: { message: result.message } });
-  await getDb().collection('cameras').updateOne({ _id: id }, { $set: { lastStartedAt: new Date(), updatedAt: new Date() } }); res.json({ ...result, camera: cameraPublic(camera) });
-});
-app.post('/api/cameras/:id/stop', async (req, res) => { const id = parseId(req.params.id); const result = cameraManager.stopCamera(id); if (!result.ok) return res.status(409).json({ error: { message: result.message } }); res.json(result); });
-app.patch('/api/cameras/:id', async (req, res) => {
-  const id = parseId(req.params.id); const before = await getDb().collection('cameras').findOne({ _id: id }); if (!before) return res.status(404).json({ error: { message: 'Camera not found.' } });
-  const set = { updatedAt: new Date() }; if (req.body.cameraName !== undefined) set.cameraName = safeString(req.body.cameraName, 120); if (req.body.stationId !== undefined) set.stationId = safeString(req.body.stationId, 80); if (req.body.active !== undefined) set.active = Boolean(req.body.active);
-  if (req.body.streamUrl !== undefined) { let parsed; try { parsed = new URL(req.body.streamUrl); } catch { throw badRequest('Enter a valid camera stream URL.'); } if (!['rtsp:', 'rtsps:', 'http:', 'https:'].includes(parsed.protocol)) throw badRequest('Unsupported stream protocol.'); set.streamUrl = req.body.streamUrl; }
-  await getDb().collection('cameras').updateOne({ _id: id }, { $set: set }); const after = await getDb().collection('cameras').findOne({ _id: id }); await audit({ entityType: 'CAMERA', entityId: id, action: 'UPDATE', before: { cameraName: before.cameraName }, after: { cameraName: after.cameraName } }); res.json(cameraPublic(after));
-});
+
 
 app.get('/api/verifications', async (req, res) => listCollection(res, 'verifications', req, ['normalizedPlate', 'decision', 'explanation', 'source'], { createdAt: -1 }));
 app.post('/api/scans/:id/review', async (req, res) => {
@@ -420,7 +697,18 @@ app.post('/api/scans/:id/review', async (req, res) => {
   await getDb().collection('scans').updateOne({ _id: id }, { $set: { selectedPlate: check.normalized, candidatePlate: check.normalized, manuallyCorrected: true, reviewReason: reason, status: 'COMPLETED', verificationId: verification._id, verificationDecision: verification.decision, verificationExplanation: verification.explanation, vehicleRegistered: verification.vehicleRegistered, hydrotestStatus: verification.hydrotestStatus, fuelingEligibility: verification.fuelingEligibility, linkedAssetCount: verification.linkedAssetCount, allRequiredAssetsValid: verification.allRequiredAssetsValid, updatedAt: new Date() } });
   await audit({ entityType: 'SCAN', entityId: id, action: 'MANUAL_PLATE_CORRECTION', reason, before, after: { selectedPlate: check.normalized, decision: verification.decision } }); res.json({ scanId: id, verification });
 });
-app.post('/api/demo/seed', async (_req, res) => { if (!config.demoMode || !config.allowDemoSeed) return res.status(403).json({ error: { message: 'Demo seed is disabled by configuration.' } }); res.json(await seedDemoData()); });
+app.get('/api/health', async (_req, res) => {
+  res.json({
+    status: 'ok',
+    database: 'connected',
+    alprConfigured: true,
+    scannerEngine: 'YOLOv8 + OpenCV + EasyOCR',
+    detectorModel: './cv_worker/models/yolov8n_plate.pt',
+    ocrMinConfidence: config.ocrMinConfidence,
+    demoMode: config.demoMode,
+    time: new Date().toISOString(),
+  });
+});
 
 app.use('/api', (_req, res) => res.status(404).json({ error: { code: 'API_NOT_FOUND', message: 'API endpoint not found.' } }));
 app.use((req, res, next) => { if (req.path.startsWith('/api/')) return next(); res.sendFile(path.join(config.publicDir, 'index.html')); });

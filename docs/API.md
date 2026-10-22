@@ -1,136 +1,202 @@
-# API Reference
+# FuelFlux API Specification
 
-Base path: `/api`. JSON responses use native MongoDB `ObjectId` values serialized as strings.
+This document details the RESTful HTTP API contract for the FuelFlux Hydrotesting & Inspection Workflow, including request/response schemas, validation rules, and status codes.
 
-## Health and dashboard
+---
 
-- `GET /api/health` — verifies API and MongoDB ping; returns database/demo status.
-- `GET /api/dashboard` — counts vehicles/assets/scans, computes current hydrotest status per active asset, returns scan volume for the last seven UTC dates and recent scans/verifications.
+## 1. Hydrotesting Contract Endpoints (Assignment Specification)
 
-## Vehicles
-
-- `GET /api/vehicles?q=&active=&stationId=&page=&pageSize=&sortBy=&sortOrder=`
-- `POST /api/vehicles`
-- `GET /api/vehicles/:id`
-- `PATCH /api/vehicles/:id`
-
-Example create body:
-
+### A. Dashboard Summary
+- **Endpoint**: `GET /api/hydrotests/summary`
+- **Description**: Returns aggregated metrics across all registered assets and inspection records.
+- **Response**: `200 OK`
 ```json
 {
-  "plateNumber": "GJ01AB1234",
-  "vehicleCategory": "CNG_CAR",
-  "stationId": "STATION-DEMO-001",
-  "make": null,
-  "model": null,
-  "recordSource": "OPERATOR"
+  "totalAssets": 15,
+  "valid": 9,
+  "dueSoon": 2,
+  "overdue": 2,
+  "failed": 1,
+  "pending": 1,
+  "noRecord": 0
 }
 ```
 
-Vehicle categories: `CNG_CAR`, `CNG_VAN`, `CNG_BUS`, `CNG_COMMERCIAL`, `OTHER_CNG`. Plate uniqueness is enforced on `plateNumberNormalized`. Supported-format syntax checking is not government registry verification.
+---
 
-## CNG assets
-
-- `GET /api/assets?q=&active=&stationId=&page=&pageSize=`
-- `POST /api/assets`
-- `GET /api/assets/:id`
-- `PATCH /api/assets/:id`
-
-Example:
-
-```json
-{
-  "assetCode": "CNG-ASSET-DEMO-001",
-  "vehicleId": "<vehicle ObjectId>",
-  "assetType": "CNG_CYLINDER",
-  "serialNumber": "DEMO-SERIAL-001",
-  "stationId": "STATION-DEMO-001"
-}
-```
-
-Asset types: `CNG_CYLINDER`, `CNG_TANK`, `CNG_EQUIPMENT`.
-
-## Hydrotests
-
-- `GET /api/hydrotests?q=&result=&page=&pageSize=`
-- `POST /api/hydrotests`
-- `GET /api/hydrotests/:id`
-- `PATCH /api/hydrotests/:id`
-
-Example:
-
-```json
-{
-  "assetId": "<asset ObjectId>",
-  "testDate": "2026-10-01",
-  "nextDueDate": "2027-10-01",
-  "performedBy": "Demo Inspection Services",
-  "result": "PASS",
-  "certificateReference": "DEMO-CERT-123",
-  "notes": "Synthetic demo record"
-}
-```
-
-Result values: `PASS`, `FAIL`, `PENDING`. Dates must be valid `YYYY-MM-DD`, and next due date must not precede test date. A reference to a non-existent asset is rejected.
-
-## Manual scans
-
-`POST /api/scans` uses `multipart/form-data` with one or more files under the field `files` (maximum 20 in one request). A `202 Accepted` response returns scan IDs:
-
+### B. List / Search CNG Assets
+- **Endpoint**: `GET /api/hydrotests/assets`
+- **Query Parameters**:
+  - `q` (optional): Free-text search matching `assetCode`, `serialNumber`, or `stationId`
+  - `stationId` (optional): Filter by station identifier
+  - `status` (optional): Filter by computed status (`VALID`, `DUE_SOON`, `OVERDUE`, `FAILED`, `PENDING`)
+  - `pageSize` (optional): Maximum results (default: 50)
+- **Response**: `200 OK`
 ```json
 {
   "items": [
-    { "_id": "<scan ObjectId>", "status": "QUEUED", "originalFilename": "entry.mp4" }
+    {
+      "_id": "6716a12b48d21c320e8b4567",
+      "assetCode": "CNG-CYL-RJ14-01",
+      "vehicleId": "6716a10048d21c320e8b4501",
+      "assetType": "CNG_CYLINDER",
+      "serialNumber": "EKC-2021-998214",
+      "stationId": "STATION-DEMO-001",
+      "active": true,
+      "createdAt": "2026-10-21T18:00:00.000Z",
+      "updatedAt": "2026-10-21T18:00:00.000Z"
+    }
+  ]
+}
+```
+
+---
+
+### C. Create CNG Asset
+- **Endpoint**: `POST /api/hydrotests/assets`
+- **Headers**: `Content-Type: application/json`
+- **Request Body**:
+```json
+{
+  "assetCode": "CNG-CYL-NEW-01",
+  "vehicleId": "6716a10048d21c320e8b4501",
+  "assetType": "CNG_CYLINDER",
+  "serialNumber": "SN-2024-88412",
+  "stationId": "STATION-DEMO-001"
+}
+```
+- **Validation**:
+  - `assetCode`: Required string (max 80 chars)
+  - `vehicleId`: Required valid ID referencing an existing vehicle
+  - `assetType`: Must be one of `CNG_CYLINDER`, `CNG_TANK`, `CNG_EQUIPMENT`
+- **Response**: `201 Created`
+
+---
+
+### D. List Hydrotest Records
+- **Endpoint**: `GET /api/hydrotests/records`
+- **Query Parameters**:
+  - `q` (optional): Search certificate reference or provider
+  - `result` (optional): `PASS`, `FAIL`, `PENDING`
+  - `pageSize` (optional): Maximum items returned
+- **Response**: `200 OK`
+```json
+{
+  "items": [
+    {
+      "_id": "6716a13c48d21c320e8b4601",
+      "assetId": "6716a12b48d21c320e8b4567",
+      "vehicleId": "6716a10048d21c320e8b4501",
+      "testDate": "2024-03-15",
+      "nextDueDate": "2027-03-15",
+      "performedBy": "Apex Gas Testing Authority",
+      "result": "PASS",
+      "certificateReference": "PESO-CERT-2024-8841",
+      "notes": "Hydrostatic stretch test passed at 300 bar.",
+      "createdAt": "2026-10-21T18:00:00.000Z",
+      "updatedAt": "2026-10-21T18:00:00.000Z"
+    }
+  ]
+}
+```
+
+---
+
+### E. Record Hydrotest
+- **Endpoint**: `POST /api/hydrotests/records`
+- **Headers**: `Content-Type: application/json`
+- **Request Body**:
+```json
+{
+  "assetId": "6716a12b48d21c320e8b4567",
+  "testDate": "2026-05-10",
+  "nextDueDate": "2029-05-10",
+  "performedBy": "National Gas Inspection Lab",
+  "result": "PASS",
+  "certificateReference": "CERT-2026-9021",
+  "notes": "Cylinder wall thickness verified. Expansion within 3%."
+}
+```
+- **Validation**:
+  - `assetId`: Required ID referencing existing cylinder
+  - `testDate`: Valid ISO date (`YYYY-MM-DD`)
+  - `nextDueDate`: Valid ISO date; **must NOT be earlier than `testDate`**
+  - `result`: Must be `PASS`, `FAIL`, or `PENDING`
+  - `certificateReference`: Unique statutory certificate number. Duplicate returns `409 Conflict`.
+- **Response**: `201 Created`
+
+---
+
+### F. Get Record by ID
+- **Endpoint**: `GET /api/hydrotests/records/:id`
+- **Response**: `200 OK` (or `404 Not Found`)
+
+---
+
+### G. Update Hydrotest Record
+- **Endpoint**: `PATCH /api/hydrotests/records/:id`
+- **Headers**: `Content-Type: application/json`
+- **Request Body**: (Any updatable fields, e.g. `result`, `notes`, `nextDueDate`)
+- **Behavior**: Preserves original `createdAt` timestamp while advancing `updatedAt`.
+- **Response**: `200 OK`
+
+---
+
+## 2. Vehicle Verification & ALPR Endpoints
+
+### A. Plate Lookup & Interlock Check
+- **Endpoint**: `GET /api/vehicles/lookup?plate=RJ14CV0002`
+- **Description**: Direct lookup in vehicle database and cylinder assets.
+- **Response**: `200 OK`
+```json
+{
+  "detected": true,
+  "plate": "RJ14CV0002",
+  "decision": "DISPENSING_ALLOWED",
+  "hydrotestStatus": "VALID",
+  "explanation": "Vehicle registered. All 1 linked CNG cylinder(s) have valid hydrotest records.",
+  "vehicle": {
+    "plateNumber": "RJ14CV0002",
+    "vehicleCategory": "CNG_CAR",
+    "make": "Kia",
+    "model": "Seltos CNG",
+    "owner": "Rajesh Sharma",
+    "stationId": "STATION-DEMO-001"
+  },
+  "assets": [
+    {
+      "assetCode": "CNG-CYL-RJ14-01",
+      "serialNumber": "EKC-2021-998214"
+    }
   ],
-  "message": "Scan jobs queued. Poll /api/scans/:id for actual progress and results."
+  "hydrotests": [
+    {
+      "certificateReference": "PESO-CERT-2024-8841",
+      "testDate": "2024-03-15",
+      "nextDueDate": "2027-03-15",
+      "result": "PASS"
+    }
+  ]
 }
 ```
 
-Then poll `GET /api/scans/:id` until terminal status. Scan statuses include `QUEUED`, `PROCESSING`, `COMPLETED`, `REVIEW_REQUIRED`, `FAILED` and `UNREADABLE`. `GET /api/scans` returns paginated history. `GET /api/scans/:id/media` serves the stored upload for the local prototype. The scan-detail response includes `vehicleRegistered`, `hydrotestStatus`, `allRequiredAssetsValid`, `fuelingEligibility`, `matchedVehicle`, and `assetEvaluations`, so the UI can show database status independently from OCR confidence.
+---
 
-`POST /api/scans/batch` scans supported files placed by an operator in `data/supplied-media/`. It does not fabricate results if that folder is empty.
-
-`POST /api/scans/:id/reverify` rechecks the saved plate candidate against the **current** vehicle/asset/hydrotest collections without rerunning OCR. It creates a new verification/audit entry and updates the scan's latest decision/status summary. A candidate that did not meet the scanner's consensus policy remains on review/hold.
-
-`POST /api/scans/:id/review` body:
-
+### B. Live Camera Frame Scan
+- **Endpoint**: `POST /api/scan/live-frame`
+- **Request Body**:
 ```json
 {
-  "plateNumber": "GJ01AB1234",
-  "reason": "Reviewed against source frame; the OCR candidate was corrected."
+  "image": "data:image/jpeg;base64,/9j/4AAQSkZJRg..."
 }
 ```
+- **Description**: Fast in-memory YOLOv8 plate detection (<50ms) + EasyOCR + vehicle database verification.
+- **Response**: `200 OK` (includes bounding box, confidence, plate, and interlock decision).
 
-A correction is audited and the record lookup is rerun. It does not alter hydrotest data.
+---
 
-## CCTV
-
-- `GET /api/cameras` — stream URLs/credentials are redacted.
-- `POST /api/cameras` — create camera with `cameraName`, `streamUrl`, optional `stationId`.
-- `PATCH /api/cameras/:id` — edit settings; `streamUrl` may be omitted to preserve it.
-- `POST /api/cameras/:id/test` — opens stream and attempts to decode a frame.
-- `POST /api/cameras/:id/start` — starts a Python stream worker and persists stable candidate events/decisions.
-- `POST /api/cameras/:id/stop` — requests worker termination.
-
-Only configure camera streams you are authorized to access. An actual hardware camera is required to verify live operation.
-
-## Verification history and demo seed
-
-- `GET /api/verifications` — filters/paginates verification decisions.
-- `POST /api/demo/seed` — only enabled if `DEMO_MODE=true` and `ALLOW_DEMO_SEED=true`.
-
-## Errors
-
-Error response:
-
-```json
-{
-  "error": {
-    "code": "VALIDATION_ERROR",
-    "message": "A readable error message.",
-    "requestId": "<request id>"
-  }
-}
-```
-
-Duplicate keys return `409 Conflict`, oversized uploads `413`, unsupported files are rejected, invalid input returns `400`, and server errors return a safe message. Detailed server errors are logged to the backend terminal with a request ID.
+### C. Manual Media Upload & Scan
+- **Endpoint**: `POST /api/scans`
+- **Headers**: `multipart/form-data`
+- **Body**: File field `files` (videos or photographs, up to 200MB)
+- **Response**: `202 Accepted` with queued scan IDs. Poll `GET /api/scans/:id` for progress and results.
