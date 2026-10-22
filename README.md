@@ -10,18 +10,17 @@
 ## Table of Contents
 
 1. [Executive Summary & Background](#1-executive-summary--background)
-2. [Evaluation Rubric Alignment (100 Points)](#2-evaluation-rubric-alignment-100-points)
-3. [Prerequisites](#3-prerequisites)
-4. [Step-by-Step Installation Guide](#4-step-by-step-installation-guide)
-5. [Step-by-Step Run Steps](#5-step-by-step-run-steps)
-6. [Database Setup & Zero-Config Engine](#6-database-setup--zero-config-engine)
-7. [Environment Variables Reference](#7-environment-variables-reference)
-8. [Data Model & Architecture Notes](#8-data-model--architecture-notes)
-9. [Required API Contract (`/api/hydrotests/*`)](#9-required-api-contract-apihydrotests)
-10. [Automated Testing & Commands](#10-automated-testing--commands)
-11. [Screenshots & Demonstration Walkthrough](#11-screenshots--demonstration-walkthrough)
-12. [Assumptions, Limitations & Next Improvements](#12-assumptions-limitations--next-improvements)
-13. [Security & Clean Submission Checklist](#13-security--clean-submission-checklist)
+2. [Prerequisites](#3-prerequisites)
+3. [Step-by-Step Installation Guide](#4-step-by-step-installation-guide)
+4. [Step-by-Step Run Steps](#5-step-by-step-run-steps)
+5. [Database Setup & Zero-Config Engine](#6-database-setup--zero-config-engine)
+6. [Environment Variables Reference](#7-environment-variables-reference)
+7. [Data Model & Architecture Notes](#8-data-model--architecture-notes)
+8. [Required API Contract (`/api/hydrotests/*`)](#9-required-api-contract-apihydrotests)
+9. [Automated Testing & Commands](#10-automated-testing--commands)
+10. [Screenshots & Demonstration Walkthrough](#11-screenshots--demonstration-walkthrough)
+11. [Assumptions, Limitations & Next Improvements](#12-assumptions-limitations--next-improvements)
+12. [Security & Clean Submission Checklist](#13-security--clean-submission-checklist)
 
 ---
 
@@ -40,21 +39,7 @@ This system provides:
 
 ---
 
-## 2. Evaluation Rubric Alignment (100 Points)
-
-| Assessment Area | Pts | Implementation in this Repository |
-|---|:---:|---|
-| **Workflow Correctness** | **25** | Complete lifecycle for vehicle and cylinder assets. Strict due/overdue calculation priority where any failed or overdue cylinder immediately engages the dispenser safety lockout. |
-| **Code Quality / Architecture** | **20** | Clean, modular ES6 architecture (`src/app.js`, `src/domain.js`, `src/scanner.js`, `src/services/verification.js`, `src/db.js`). Zero external UI bloat; fast vanilla JavaScript design system. |
-| **Data Model & Validation** | **15** | Relational integrity across Vehicles, CNG Assets, Hydrotests, and Scans. Strict input validation, date-only parsing, `nextDueDate >= testDate` enforcement, duplicate certificate rejection (`HTTP 409`), and timestamp preservation (`createdAt`/`updatedAt`). |
-| **Testing & Reliability** | **15** | **18 Automated Node.js Tests** (`npm test`) covering unit domain rules, API lifecycle, validation constraints, and plate normalization consensus. |
-| **Usability** | **10** | Rich, modern dark-mode operator interface with real-time camera viewfinder, reticle brackets, laser sweep animation, HSRP badge rendering, status chips, search/filter rows, and immediate feedback. |
-| **Documentation** | **10** | Complete submission documentation strictly adhering to assignment deliverables (`README.md`, `ARCHITECTURE.md`, `API.md`, `TESTING.md`, `ASSUMPTIONS_AND_LIMITATIONS.md`, `DEMO_GUIDE.md`). |
-| **Security & Data Handling** | **5** | 100% synthetic/demo data. No committed secrets or real credentials. Strict Helmet security headers, `.env.example` placeholders, and fail-safe interlock defaults. |
-
----
-
-## 3. Prerequisites
+## 2. Prerequisites
 
 Before installing, ensure the host machine has the following installed:
 
@@ -68,7 +53,7 @@ Before installing, ensure the host machine has the following installed:
 
 ---
 
-## 4. Step-by-Step Installation Guide
+## 3. Step-by-Step Installation Guide
 
 Follow these steps to set up the project locally from scratch:
 
@@ -129,7 +114,7 @@ npm run seed
 
 ---
 
-## 5. Step-by-Step Run Steps
+## 4. Step-by-Step Run Steps
 
 ### Start the Application
 
@@ -163,7 +148,7 @@ Press `Ctrl + C` in your terminal window. The shutdown hook will terminate the P
 
 ---
 
-## 6. Database Setup & Zero-Config Engine
+## 5. Database Setup & Zero-Config Engine
 
 The project supports two seamless database modes:
 
@@ -189,7 +174,7 @@ The project supports two seamless database modes:
 
 ---
 
-## 7. Environment Variables Reference
+## 6. Environment Variables Reference
 
 All runtime configuration is managed via environment variables defined in `.env` (derived from `.env.example`):
 
@@ -206,7 +191,7 @@ All runtime configuration is managed via environment variables defined in `.env`
 
 ---
 
-## 8. Data Model & Architecture Notes
+## 7. Data Model & Architecture Notes
 
 ### Entity Relationship Diagram (ERD)
 
@@ -269,7 +254,7 @@ DO_NOT_DISPENSE DO_NOT_DISPENSE DISPENSING_ALLOWED
 
 ---
 
-## 9. Required API Contract (`/api/hydrotests/*`)
+## 8. Required API Contract (`/api/hydrotests/*`)
 
 Per Section 3 of the assignment specification, the following endpoints are implemented and fully tested:
 
@@ -287,7 +272,7 @@ Per Section 3 of the assignment specification, the following endpoints are imple
 
 ---
 
-## 10. Automated Testing & Commands
+## 9. Automated Testing & Commands
 
 The project includes an automated test suite verifying domain logic, date parsing, safety interlock decisions, and API endpoints.
 
@@ -324,7 +309,7 @@ npm test
 
 ---
 
-## 11. Screenshots & Demonstration Walkthrough
+## 10. Screenshots & Demonstration Walkthrough
 
 ### UI Architecture & Dark Mode Aesthetics
 The user interface is built with an industrial dark-mode palette (`#060a10`, `#0b111a`, `#1f2c3f`), Manrope typography, glowing safety interlocks, and responsive views:
@@ -357,7 +342,7 @@ Follow the complete evaluation presenter script detailed in [docs/DEMO_GUIDE.md]
 
 ---
 
-## 12. Assumptions, Limitations & Next Improvements
+## 11. Assumptions, Limitations & Next Improvements
 
 ### Key Assumptions:
 1. **Statutory 3-Year Re-test Interval**: Aligns with PESO (Petroleum and Explosives Safety Organisation) rules requiring high-pressure automotive CNG cylinders to undergo hydrostatic stretch testing every 3 years.
@@ -377,7 +362,7 @@ Follow the complete evaluation presenter script detailed in [docs/DEMO_GUIDE.md]
 
 ---
 
-## 13. Security & Clean Submission Checklist
+## 12. Security & Clean Submission Checklist
 
 - [x] **No Hardcoded Secrets**: Zero API keys or production database credentials committed.
 - [x] **Fictional Data**: 100% synthetic vehicles, cylinders, and certificates.
