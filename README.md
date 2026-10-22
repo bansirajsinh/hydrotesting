@@ -1,10 +1,9 @@
 # FuelFlux Hydrotesting Management & Inspection Workflow
 
-> **FUELFLUX TECHNOLOGY PRIVATE LIMITED — Candidate Technical Assignment**  
+> **FUELFLUX TECHNOLOGY PRIVATE LIMITED**
 > **Candidate Name:** Bansirajsinh Gohil  
 > **Repository:** https://github.com/bansirajsinh/hydrotesting.git  
 > **Date:** October 2026  
-> **Demonstration Link:** 3–5 Minute Evaluator Walkthrough (See [docs/DEMO_GUIDE.md](docs/DEMO_GUIDE.md))  
 
 ---
 

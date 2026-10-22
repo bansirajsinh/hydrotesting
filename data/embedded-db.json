@@ -1317,6 +1317,21 @@
       "createdAt": "2026-10-22T13:35:35.347Z",
       "updatedAt": "2026-10-22T13:35:55.666Z",
       "_id": "6ada112704047e23a4d2ea97"
+    },
+    {
+      "assetId": "6ada10ee04047e23a4d2ea95",
+      "vehicleId": "6ada10cb04047e23a4d2ea93",
+      "testDate": "2026-05-10",
+      "nextDueDate": "2029-05-10",
+      "result": "PASS",
+      "performedBy": "National Gas Testing Authority",
+      "certificateReference": "CERT-AUTO-1792677629509",
+      "notes": "Updated test notes via automated test",
+      "reportStorageKey": null,
+      "recordSource": "OPERATOR",
+      "createdAt": "2026-10-22T14:00:29.513Z",
+      "updatedAt": "2026-10-22T14:00:29.545Z",
+      "_id": "6ada16fd0d147ddd602ee224"
     }
   ],
   "scans": [
@@ -8814,6 +8829,39 @@
       "correlationId": null,
       "createdAt": "2026-10-22T13:37:21.822Z",
       "_id": "6ada119104047e23a4d2ea9f"
+    },
+    {
+      "entityType": "HYDROTEST",
+      "entityId": "6ada16fd0d147ddd602ee224",
+      "action": "CREATE",
+      "actorId": "demo-operator",
+      "reason": null,
+      "before": null,
+      "after": {
+        "certificateReference": "CERT-AUTO-1792677629509",
+        "result": "PASS"
+      },
+      "correlationId": null,
+      "createdAt": "2026-10-22T14:00:29.524Z",
+      "_id": "6ada16fd0d147ddd602ee225"
+    },
+    {
+      "entityType": "HYDROTEST",
+      "entityId": "6ada16fd0d147ddd602ee224",
+      "action": "UPDATE",
+      "actorId": "demo-operator",
+      "reason": null,
+      "before": {
+        "result": "PASS",
+        "nextDueDate": "2029-05-10"
+      },
+      "after": {
+        "result": "PASS",
+        "nextDueDate": "2029-05-10"
+      },
+      "correlationId": null,
+      "createdAt": "2026-10-22T14:00:29.554Z",
+      "_id": "6ada16fd0d147ddd602ee226"
     }
   ],
   "mediaFiles": [
