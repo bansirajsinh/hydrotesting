@@ -429,6 +429,9 @@ def detect_plate_in_frame(frame: np.ndarray, min_conf: float = 0.15) -> list[dic
         if uh > 0 and 1.2 <= (uw / uh) <= 7.5:
             box_items.append((max(b[0] for b in box_items), u_x1, u_y1, u_x2, u_y2))
 
+    # Prioritize higher confidence and larger area boxes first
+    box_items.sort(key=lambda b: (b[0], (b[3] - b[1]) * (b[4] - b[2])), reverse=True)
+
     for conf, x1, y1, x2, y2 in box_items:
         crop_w = x2 - x1
         crop_h = y2 - y1
@@ -463,7 +466,7 @@ def detect_plate_in_frame(frame: np.ndarray, min_conf: float = 0.15) -> list[dic
                         best_ocr_conf = cand_conf
                         best_shape = shape
 
-            if PLATE_RE.fullmatch(best_text) and best_ocr_conf > 0.65:
+            if (PLATE_RE.fullmatch(best_text) or plate_shape_score(best_text) >= 1.0) and best_ocr_conf > 0.60:
                 break
 
         if best_text and len(best_text) >= 6:
@@ -515,12 +518,12 @@ def process_image(img_path: Path) -> dict:
         if cur_dets:
             detections.extend(cur_dets)
             # If high confidence Indian plate is found, exit immediately
-            if any(len(d["plate"]) >= 8 and plate_shape_score(d["plate"]) >= 1.0 for d in cur_dets):
+            if any(len(d["plate"]) >= 7 and (plate_shape_score(d["plate"]) >= 0.8 or d.get("confidence", 0) >= 0.60) for d in cur_dets):
                 break
 
-    # Fallback to direct OCR on resized image if no YOLO plate bounding box was detected or only partial plate
-    has_full_plate = any(len(d["plate"]) >= 8 and plate_shape_score(d["plate"]) >= 1.0 for d in detections)
-    if not has_full_plate:
+    # Fallback to direct OCR on resized image only if no plausible plate bounding box was detected
+    has_plausible_plate = any(len(d["plate"]) >= 7 and (plate_shape_score(d["plate"]) >= 0.8 or d.get("confidence", 0) >= 0.50) for d in detections)
+    if not has_plausible_plate and not detections:
         for rot_deg, rot_flag in rotations_to_try:
             cur_img = img if rot_flag is None else cv2.rotate(img, rot_flag)
             ih, iw = cur_img.shape[:2]
