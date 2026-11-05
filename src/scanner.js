@@ -5,7 +5,6 @@ const config = require('./config');
 
 const MAX_STDOUT_BYTES = 5_000_000;
 const MAX_STDERR_BYTES = 1_000_000;
-const WARM_SERVER_URL = `http://127.0.0.1:${process.env.LIVE_SCAN_PORT || '5050'}`;
 
 function parseWorkerJson(stdout) {
   const lines = String(stdout || '')
@@ -42,60 +41,7 @@ function safeWorkerError(parsed, stderr, code) {
   return parts.join(' | ');
 }
 
-/**
- * Try the warm in-memory Python server (live_server.py /scan-file) first.
- * This avoids the 10-15 second cold start of loading YOLOv8 + EasyOCR on every scan.
- * Falls back to cold spawn if the warm server is not reachable.
- */
-async function runScanWarm(filePath, onProgress = null, timeoutMs = 90000) {
-  const absolutePath = path.resolve(filePath);
-
-  if (onProgress) {
-    onProgress({ type: 'PROGRESS', percent: 15, stage: 'WARM_ENGINE', message: 'Connecting to pre-warmed AI engine...' });
-  }
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    const resp = await fetch(`${WARM_SERVER_URL}/scan-file`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        filePath: absolutePath,
-        sampleFps: Number(process.env.VIDEO_SAMPLE_FPS || '2.0'),
-        maxFrames: Number(process.env.MAX_VIDEO_FRAMES || '20'),
-      }),
-      signal: controller.signal,
-    });
-
-    clearTimeout(timeout);
-
-    if (!resp.ok) {
-      const text = await resp.text();
-      throw new Error(`Warm server returned ${resp.status}: ${text}`);
-    }
-
-    const result = await resp.json();
-
-    if (onProgress) {
-      onProgress({ type: 'PROGRESS', percent: 95, stage: 'VERIFYING_CONSENSUS', message: 'Evaluating candidate ranking & safety compliance...' });
-    }
-
-    if (['INIT_ERROR', 'ERROR'].includes(result.status) && result.error) {
-      throw new Error(String(result.error));
-    }
-
-    return result;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-/**
- * Cold spawn fallback — starts a new Python process from scratch.
- */
-function runScanCold(filePath, onProgress = null, timeoutMs = 120000) {
+function runScan(filePath, onProgress = null, timeoutMs = 120000) {
   return new Promise((resolve, reject) => {
     if (!filePath || !fs.existsSync(filePath)) {
       reject(new Error('Uploaded media file is not present on the server.'));
@@ -108,7 +54,7 @@ function runScanCold(filePath, onProgress = null, timeoutMs = 120000) {
       '--input', absolutePath,
       '--json',
       '--sample-fps', String(process.env.VIDEO_SAMPLE_FPS || '2.0'),
-      '--max-frames', String(process.env.MAX_VIDEO_FRAMES || '20')
+      '--max-frames', String(process.env.MAX_VIDEO_FRAMES || '15')
     ];
     let child;
     try {
@@ -215,28 +161,5 @@ function runScanCold(filePath, onProgress = null, timeoutMs = 120000) {
   });
 }
 
-/**
- * Primary entry point: try warm server first (instant), fall back to cold spawn.
- */
-async function runScan(filePath, onProgress = null, timeoutMs = 120000) {
-  if (!filePath || !fs.existsSync(filePath)) {
-    throw new Error('Uploaded media file is not present on the server.');
-  }
-
-  // Attempt 1: warm in-memory server (models already loaded — 3-10x faster)
-  try {
-    const result = await runScanWarm(filePath, onProgress, timeoutMs);
-    return result;
-  } catch (warmErr) {
-    // Warm server unavailable or errored — fall back to cold spawn
-    console.log(`Warm scan server unavailable (${warmErr.message}), falling back to cold Python spawn...`);
-  }
-
-  // Attempt 2: cold spawn (legacy path — loads models from scratch)
-  if (onProgress) {
-    onProgress({ type: 'PROGRESS', percent: 8, stage: 'COLD_START', message: 'Loading AI models from disk (cold start)...' });
-  }
-  return runScanCold(filePath, onProgress, timeoutMs);
-}
-
 module.exports = { runScan, parseWorkerJson, safeWorkerError };
+
